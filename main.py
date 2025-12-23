@@ -3,6 +3,7 @@ import requests
 import asyncio
 import random
 import re
+import time
 from threading import Thread
 from flask import Flask
 from bs4 import BeautifulSoup
@@ -15,7 +16,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 bot = Client(
-    "token_hunter",
+    "yopmail_v7",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -23,10 +24,10 @@ bot = Client(
     ipv6=False
 )
 
-# ==================== WEB SERVER (7/24) ====================
+# ==================== WEB SERVER ====================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Token Hunter Aktif! 🟢"
+def home(): return "V7 Hunter Aktif! 🟢"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -39,7 +40,6 @@ def keep_alive():
 
 # ==================== RAM VERİTABANI ====================
 USER_LIMITS = {}
-
 def check_user_rights(user_id):
     if user_id == OWNER_ID: return True, "Sınırsız"
     if user_id not in USER_LIMITS: USER_LIMITS[user_id] = 5
@@ -48,39 +48,56 @@ def check_user_rights(user_id):
         return True, USER_LIMITS[user_id]
     return False, 0
 
-# ==================== YENİ TOKENLI CHECKER ====================
-def check_yopmail_v6(email):
+# ==================== CHECKER MOTORU (V7 - COOKIE FIX) ====================
+def check_yopmail_v7(email):
     username = email.split('@')[0]
     
-    # 1. Oturum Aç
+    # Session (Oturum) Başlat
     s = requests.Session()
     
-    # Headerlar (Birebir Chrome Taklidi)
+    # Bu Headerlar ÇOK ÖNEMLİ. Birebir Tarayıcı Taklidi.
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://yopmail.com/en/",
+        "Origin": "https://yopmail.com",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1"
     }
 
+    # Çerezler (GDPR Engelini Geçmek İçin)
+    # Yopmail'e "Ben daha önce girdim, kabul ettim" diyoruz.
+    cookies = {
+        "consent": "yes",
+        "cw": "1", # Cookie Warning kapalı
+        "ytime": str(int(time.time())) # Zaman damgası
+    }
+    s.cookies.update(cookies)
+
     try:
-        # ADIM 1: Ana Sayfaya Git ve Gizli 'yp' Kodunu Çal
+        # ADIM 1: Ana Sayfadan Token Çal
         r_main = s.get("https://yopmail.com/en/", headers=headers, timeout=10)
         
-        # HTML içinden 'yp' değerini bul (Regex ile)
-        # Yopmail bunu <input type="hidden" id="yp" value="XXX"> diye saklar
-        match = re.search(r'id="yp" value="([^"]+)"', r_main.text)
-        if not match:
-            return "ERROR", "Token Bulunamadı (Site Yapısı Değişmiş)"
+        # Regex ile 'yp' değerini bul (Tırnak işaretlerine duyarlı)
+        # Yopmail bazen value="XXX" bazen value='XXX' yapar.
+        yp_match = re.search(r'id=["\']?yp["\']?\s+value=["\']?([^"\']+)["\']?', r_main.text)
+        yj_match = re.search(r'id=["\']?yj["\']?\s+value=["\']?([^"\']+)["\']?', r_main.text)
         
-        yp_token = match.group(1)
-        
-        # Ayrıca 'yj' versiyonunu da bulalım
-        match_yj = re.search(r'id="yj" value="([^"]+)"', r_main.text)
-        yj_token = match_yj.group(1) if match_yj else "V2"
+        if not yp_match:
+            # Eğer token bulamazsa muhtemelen Captcha yedik
+            if "Captcha" in r_main.text or "robot" in r_main.text:
+                return "BLOCK", "Captcha Çıktı"
+            return "ERROR", "Token Bulunamadı (HTML Değişti)"
+            
+        yp = yp_match.group(1)
+        yj = yj_match.group(1) if yj_match else "V2"
 
-        # ADIM 2: Token ile Kutuya Gir
+        # ADIM 2: Kutuya Gir
         inbox_url = "https://yopmail.com/en/inbox"
-        
         params = {
             "login": username,
             "p": "1",
@@ -88,62 +105,64 @@ def check_yopmail_v6(email):
             "ctrl": "",
             "scrl": "",
             "spam": True,
-            "yp": yp_token, # <--- İŞTE BU EKSİKTİ!
-            "yj": yj_token,
+            "yp": yp, # Çaldığımız token
+            "yj": yj,
             "v": "3.1"
         }
         
-        # Cookie'leri ve Token'i kullanarak isteği at
         r_inbox = s.post(inbox_url, data=params, headers=headers, timeout=10)
-        
-        # Engel Kontrolü
-        if "To protect our service" in r_inbox.text: return "BLOCK", "IP Ban"
 
         # HTML Analizi
         soup = BeautifulSoup(r_inbox.text, "html.parser")
-        
-        # Tüm metni küçük harfe çevirip tarayalım (Garanti olsun)
-        page_text = r_inbox.text.lower()
-        
-        # Eğer sayfada "No mail for" yazıyorsa boştur
-        if "no mail for" in page_text or "inbox is empty" in page_text:
+        text_lower = r_inbox.text.lower()
+
+        # Boş Kontrolü
+        if "no mail for" in text_lower or "inbox is empty" in text_lower:
             return "EMPTY", "Boş"
 
-        # KATEGORİLER
+        # Kategori Taraması
         tags = []
+        msgs = []
         
-        # 1. SUPERCELL
-        if any(x in page_text for x in ["supercell", "brawl", "clash", "id code", "login code"]):
-            tags.append("SUPERCELL")
+        # Mail Başlıklarını Al
+        # Yopmail masaüstünde 'lms', mobilde 'm' class kullanır.
+        mail_items = soup.find_all("div", class_="lms")
+        if not mail_items: mail_items = soup.find_all("div", class_="m")
 
-        # 2. SOCIAL
-        if any(x in page_text for x in ["instagram", "tiktok", "facebook", "twitter", "snapchat"]):
-            tags.append("SOCIAL")
+        # Kelime Havuzu
+        keywords = {
+            "SUPERCELL": ["supercell", "brawl", "clash", "id code", "login code", "verification"],
+            "SOCIAL": ["instagram", "tiktok", "facebook", "twitter", "snapchat"],
+            "GAME": ["steam", "valorant", "riot", "roblox", "epic games", "pubg"],
+            "CRYPTO": ["binance", "metamask", "trust wallet", "rollercoin"]
+        }
 
-        # 3. GAME
-        if any(x in page_text for x in ["steam", "valorant", "riot", "roblox", "epic games"]):
-            tags.append("GAME")
-
-        # 4. CRYPTO
-        if any(x in page_text for x in ["binance", "metamask", "rollercoin"]):
-            tags.append("CRYPTO")
-
-        # Hit Kontrolü
-        if tags:
-            # Mail başlıklarını çekmeye çalış (Görsellik için)
-            subjects = []
-            for div in soup.find_all("div", class_="lms"):
-                subjects.append(div.get_text().strip())
+        # İçerik Analizi
+        for item in mail_items:
+            txt = item.get_text().strip()
+            txt_lower = txt.lower()
             
-            return "HIT", {"tags": list(set(tags)), "msgs": subjects[:3]}
+            # Etiketle
+            for cat, words in keywords.items():
+                if any(w in txt_lower for w in words):
+                    if cat not in tags: tags.append(cat)
+                    msgs.append(txt) # Detay ekle
         
-        # Eğer tag yok ama 'Boş' da değilse, önemsiz mail vardır
-        # Bunu kullanıcıya "Boş" dememek için BAD olarak işaretliyoruz
-        if "lms" in r_inbox.text or "mname" in r_inbox.text:
-             return "BAD", "Değersiz Mail"
-             
-        # Hiçbir şey bulamadıysa
-        return "EMPTY", "Boş"
+        # Eğer sayfanın tamamında kelime geçiyorsa ama div bulamadıysak (Garanti)
+        if not tags:
+            for cat, words in keywords.items():
+                if any(w in text_lower for w in words):
+                    tags.append(cat)
+                    msgs.append("Başlık Alınamadı (İçerikte Var)")
+
+        if tags:
+            return "HIT", {"tags": list(set(tags)), "msgs": msgs[:3]}
+        
+        # Mail var ama bizim aradığımız değil
+        if mail_items or "lms" in text_lower:
+            return "BAD", "Değersiz Mail"
+            
+        return "EMPTY", "Boş (Görünürde)"
 
     except Exception as e: return "ERROR", str(e)
 
@@ -152,53 +171,43 @@ def check_yopmail_v6(email):
 async def start(c, m):
     uid = m.from_user.id
     role = "👑 Admin" if uid == OWNER_ID else "👤 Kullanıcı"
-    await m.reply(f"🔥 **Token Hunter V6**\nRol: {role}\n\n`/random` ile dene veya dosya at.")
+    await m.reply(f"🔥 **V7 Final Hunter**\nRol: {role}\n\n`/random` veya Dosya at.")
 
 @bot.on_message(filters.command("random"))
 async def random_scan(client, message):
     user_id = message.from_user.id
     allowed, remaining = check_user_rights(user_id)
     
-    if not allowed:
-        await message.reply("⛔ Hakkın bitti.")
-        return
+    if not allowed: await message.reply("⛔ Hakkın bitti."); return
 
     msg = await message.reply("🎲 **Aranıyor...**")
-    
-    # Rastgele İsim Listesi
-    names = ["ahmet", "mehmet", "ali", "veli", "can", "emir", "pro", "king", "baba", "oyun"]
+    names = ["ahmet", "mehmet", "ali", "veli", "can", "emir", "pro", "king"]
     emails = [f"{random.choice(names)}{random.randint(100, 2025)}@yopmail.com" for _ in range(10)]
     
     hits = 0
-    
     for email in emails:
-        status, res = check_yopmail_v6(email)
+        status, res = check_yopmail_v7(email)
         
         if status == "HIT":
             hits += 1
             tags = " ".join([f"#{t}" for t in res['tags']])
             msgs = "\n".join([f"🔹 {m}" for m in res['msgs']])
-            text = f"🚨 **HIT!**\n🏷️ {tags}\n📧 `{email}`\n{msgs}\n🔗 [Giriş](https://yopmail.com/en?login={email.split('@')[0]})"
-            await message.reply(text, disable_web_page_preview=True)
-            
+            txt = f"🚨 **HIT!**\n🏷️ {tags}\n📧 `{email}`\n{msgs}\n🔗 [Giriş](https://yopmail.com/en?login={email.split('@')[0]})"
+            await message.reply(txt, disable_web_page_preview=True)
             if user_id != OWNER_ID:
-                try: await client.send_message(OWNER_ID, f"VERGİ:\n{text}")
+                try: await client.send_message(OWNER_ID, f"VERGİ:\n{txt}")
                 except: pass
-                
-        elif status == "BLOCK":
-            await message.reply("⛔ IP Ban, bekliyorum...")
-            await asyncio.sleep(15)
-            
-        await asyncio.sleep(1.5)
         
+        elif status == "BLOCK":
+            await message.reply("⛔ Captcha çıktı, 15sn bekle...")
+            await asyncio.sleep(15)
+        
+        await asyncio.sleep(1.5)
     await msg.edit(f"🏁 Bitti. Hit: {hits}")
 
 @bot.on_message(filters.document)
 async def handle_file(client, message):
-    if message.from_user.id != OWNER_ID:
-        await message.reply("🔒 Yasak.")
-        return
-
+    if message.from_user.id != OWNER_ID: await message.reply("🔒 Yasak."); return
     status_msg = await message.reply("📥 **Admin Dosyası...**")
     file_path = await message.download()
     
@@ -206,30 +215,25 @@ async def handle_file(client, message):
         emails = [l.strip() for l in f if "@yopmail.com" in l]
     
     if not emails: await status_msg.edit("❌ Mail yok."); return
-
     hits = 0
     checked = 0
     
     for email in emails:
-        status, res = check_yopmail_v6(email)
-        
+        status, res = check_yopmail_v7(email)
         if status == "HIT":
             hits += 1
             tags = " ".join([f"#{t}" for t in res['tags']])
             msgs = "\n".join([f"🔹 {m}" for m in res['msgs']])
             await message.reply(f"🚨 **HIT!**\n🏷️ {tags}\n📧 `{email}`\n{msgs}\n🔗 [Giriş](https://yopmail.com/en?login={email.split('@')[0]})", disable_web_page_preview=True)
-        
         elif status == "BLOCK":
-            await status_msg.edit(f"⚠️ Engel! 15sn Mola...")
+            await status_msg.edit(f"⚠️ Captcha! 15sn Mola...")
             await asyncio.sleep(15)
-
+        
         checked += 1
         if checked % 20 == 0:
             try: await status_msg.edit(f"⏳ {checked}/{len(emails)} | Hit: {hits}")
             except: pass
-        
         await asyncio.sleep(1.5)
-
     os.remove(file_path)
     await message.reply(f"🏁 Bitti! Toplam: {checked} | Hit: {hits}")
 
