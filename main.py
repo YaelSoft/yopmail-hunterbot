@@ -71,55 +71,97 @@ def generate_random_emails(count=10):
         generated.append(email)
     return generated
 
-# ==================== CHECKER (Hızlı & Proxy Yok) ====================
+# ==================== DÜZELTİLMİŞ CHECKER (Cookies Fix) ====================
 def check_yopmail_v3(email):
     username = email.split('@')[0]
-    url = "https://yopmail.com/en/inbox"
     
+    # 1. Adım: Önce Ana Sayfaya Gir (Çerezleri Al)
+    main_url = "https://yopmail.com/en/"
+    inbox_url = "https://yopmail.com/en/inbox"
+    
+    # Masaüstü Chrome Taklidi (En Sağlamı)
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://yopmail.com/en/",
+        "Origin": "https://yopmail.com",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
-    data = {"login": username, "p": "1", "d": "", "ctrl": "", "scrl": "", "spam": True, "v": "3.1", "yj": "V2"}
     
     try:
+        # Session açıyoruz (Çerezleri hafızada tutsun diye)
         with requests.Session() as s:
-            r = s.post(url, data=data, headers=headers, timeout=8)
-            if "To protect our service" in r.text: return "BLOCK", "IP Ban"
-            if r.status_code != 200: return "ERROR", "Hata"
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            subjects = soup.find_all("div", class_="lms")
+            # A) Önce Ana Sayfaya "Selam" ver
+            s.get(main_url, headers=headers, timeout=5)
             
-            if not subjects: return "EMPTY", "Boş"
+            # B) Şimdi Kutuya Gir
+            data = {
+                "login": username,
+                "p": "1", # Sayfa 1
+                "d": "",
+                "ctrl": "",
+                "scrl": "",
+                "spam": True, # Spamları da göster
+                "yj": "V2",   # Yopmail versiyonu
+                "v": "3.1"
+            }
+            
+            r = s.post(inbox_url, data=data, headers=headers, timeout=8)
+            
+            # Engel Kontrolü
+            if r.status_code != 200: return "ERROR", f"Kod: {r.status_code}"
+            if "To protect our service" in r.text or "Captcha" in r.text:
+                return "BLOCK", "IP Ban"
 
+            # HTML Analizi
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            # Yopmail Masaüstü sürümünde mailler 'm' veya 'lms' class'ında olur
+            # İkisini de kontrol edelim garanti olsun
+            subjects = soup.find_all("div", class_="lms") # Konu Başlığı
+            senders = soup.find_all("span", class_="lmf") # Gönderen
+            
+            if not subjects:
+                # Belki yapı farklıdır, 'm' classına bakalım (Mobil görünüm için)
+                subjects = soup.find_all("div", class_="m")
+
+            if not subjects:
+                if "No mail for" in r.text or "is empty" in r.text:
+                    return "EMPTY", "Boş"
+                # Eğer 'Boş' yazmıyorsa ama mail de bulamadıysa, HTML yüklenemedi demektir.
+                # Debug için html'in bir kısmını yazdırabilirsin: print(r.text[:500])
+                return "EMPTY", "Görünürde Boş"
+
+            # KATEGORİ TARAMASI
             tags = []
             details = []
             
-            for s in subjects:
-                txt = s.get_text().lower()
-                
-                # GENİŞ KATEGORİ LİSTESİ
-                if any(x in txt for x in ["supercell", "brawl", "clash", "login code"]):
-                    if "SUPERCELL" not in tags: tags.append("SUPERCELL")
-                    details.append(s.get_text().strip())
+            # Hem başlıkları hem gönderenleri birleştirip tarayalım (Daha garanti)
+            all_text = r.text.lower()
+            
+            # 1. SUPERCELL (Brawl Stars, Clash)
+            if "supercell" in all_text or "brawl" in all_text or "clash" in all_text or "id code" in all_text:
+                tags.append("SUPERCELL")
 
-                elif any(x in txt for x in ["instagram", "facebook", "tiktok", "twitter", "snapchat"]):
-                    if "SOCIAL" not in tags: tags.append("SOCIAL")
-                    details.append(s.get_text().strip())
+            # 2. SOCIAL (Instagram, TikTok)
+            if "instagram" in all_text or "tiktok" in all_text or "facebook" in all_text or "twitter" in all_text:
+                tags.append("SOCIAL")
 
-                elif any(x in txt for x in ["steam", "valorant", "riot", "epic", "roblox", "minecraft"]):
-                    if "GAME" not in tags: tags.append("GAME")
-                    details.append(s.get_text().strip())
-                
-                elif any(x in txt for x in ["binance", "rollercoin", "metamask"]):
-                    if "CRYPTO" not in tags: tags.append("CRYPTO")
-                    details.append(s.get_text().strip())
+            # 3. GAMES (Steam, Valorant)
+            if "steam" in all_text or "riot" in all_text or "valorant" in all_text or "epic games" in all_text:
+                tags.append("GAME")
+
+            # Detayları çek (İlk 3 mail başlığı)
+            for s in subjects[:3]:
+                details.append(s.get_text().strip())
 
             if tags:
-                return "HIT", {"tags": tags, "msgs": list(set(details))}
+                return "HIT", {"tags": list(set(tags)), "msgs": details}
             
-            return "BAD", "Değersiz"
+            # Eğer etiket yoksa ama mail varsa
+            return "BAD", "Mail Var Ama Değersiz"
 
     except Exception as e: return "ERROR", str(e)
 
