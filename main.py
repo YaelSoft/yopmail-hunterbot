@@ -17,7 +17,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-DEFAULT_TARGET_ID = int(os.environ.get("TARGET_GROUP_ID", -100123456789))
+DEFAULT_TARGET_ID = int(os.environ.get("TARGET_GROUP_ID", -1003598285370))
 
 # Loglama
 logging.basicConfig(level=logging.INFO)
