@@ -1,5 +1,5 @@
-pyrogram
-tgcrypto
+Flask
+telethon
 requests
 beautifulsoup4
-flask
+asyncio
