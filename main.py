@@ -2,12 +2,13 @@ import os
 import logging
 import asyncio
 import random
-import cloudscraper # SİHİRLİ KÜTÜPHANE BU
-from fake_useragent import UserAgent # MASKEMİZ BU
+import cloudscraper 
+from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession # <--- İŞTE BU EKSİKTİ
 from telethon.errors import FloodWaitError, UsernameInvalidError, ChannelPrivateError
 
 # ==================== AYARLAR ====================
@@ -52,9 +53,19 @@ KEYWORDS = {
     "ifsa": ["link", "arsiv", "twerk", "tiktok", "onlyfans", "yetiskin", "nsfw", "18+"]
 }
 
-# Bot Tanımları
+# ==================== CLIENT DÜZELTME ====================
+
+# 1. Yönetici Bot (BotFather)
+# Bot API session string kullanmaz, direkt token ile başlar.
 bot = TelegramClient("manager_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-userbot = TelegramClient("worker_userbot", API_ID, API_HASH, session_string=SESSION_STRING)
+
+# 2. İşçi Userbot (Session String DÜZELTİLDİ)
+# StringSession içine almazsan hata verir!
+if SESSION_STRING:
+    userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+else:
+    # Eğer session yoksa dosya oluşturmaya çalışır (Render'da hata verir ama kod çökmez)
+    userbot = TelegramClient("worker_userbot", API_ID, API_HASH)
 
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
@@ -74,57 +85,39 @@ def determine_topic(title, bio):
             if key in full_text: return cat, TOPIC_MAP.get(cat)
     return "Diğer", TOPIC_MAP["random"]
 
-# ==================== ZIRHLI SCRAPER (GÜNCELLENDİ) ====================
+# ==================== ZIRHLI SCRAPER ====================
 
 def scrape_site(url):
-    """Cloudscraper ile korumalı sitelerden link çeker"""
     links = []
-    
-    # 1. Maskeleme (Rastgele User-Agent)
     ua = UserAgent()
-    random_ua = ua.random
-    logger.info(f"🎭 Maske Takıldı: {random_ua}")
     
-    # 2. Scraper Oluştur
-    # browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-    # Bu ayar Cloudflare'e "Ben Windows kullanan Chrome tarayıcısıyım" der.
     scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
+        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
     )
 
     try:
         logger.info(f"🥷 Siteye sızılıyor: {url}")
-        
-        # Requests yerine scraper.get kullanıyoruz
         response = scraper.get(url, timeout=20)
         
         if response.status_code != 200:
             logger.error(f"❌ Erişim engellendi! Kod: {response.status_code}")
             return []
         
-        logger.info("✅ Siteye giriş başarılı! Linkler toplanıyor...")
-        
         soup = BeautifulSoup(response.text, "html.parser")
         
+        # Genel tarama
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            # Telegram linklerini ayıkla
             if "t.me/" in href and "joinchat" not in href:
                 clean = href.split("?")[0].strip()
-                if clean not in links:
-                    links.append(clean)
+                if clean not in links: links.append(clean)
         
-        # Ekstra: Butonların içindeki linkleri de ara (Tgram.io gibi siteler için)
+        # Buton tarama
         for btn in soup.select("a.btn, a.button, div.button"):
              href = btn.get("href")
              if href and "t.me/" in href:
                  clean = href.split("?")[0].strip()
-                 if clean not in links:
-                     links.append(clean)
+                 if clean not in links: links.append(clean)
 
         random.shuffle(links)
         return links
@@ -134,7 +127,6 @@ def scrape_site(url):
         return []
 
 async def process_link(link):
-    """Userbot ile linki analiz eder ve gönderir"""
     try:
         username = link.split("t.me/")[-1].replace("@", "")
         if not username: return False
@@ -179,7 +171,7 @@ async def process_link(link):
 
 async def scraper_task(status_msg):
     global CURRENT_CONFIG
-    await status_msg.edit(f"🚀 **Tarama Başladı!**\n\nHedef: `{CURRENT_CONFIG['current_url']}`\nMod: `Cloudflare Bypass`")
+    await status_msg.edit(f"🚀 **Tarama Başladı!**\n\nHedef: `{CURRENT_CONFIG['current_url']}`")
     
     while CURRENT_CONFIG["is_running"]:
         try:
@@ -189,8 +181,7 @@ async def scraper_task(status_msg):
             new_links = [l for l in links if l not in history]
             
             if not new_links:
-                logger.info("Yeni link yok, sayfa yenileniyor...")
-                # Link yoksa bekleme süresini artır
+                logger.info("Yeni link yok, bekleniyor...")
                 await asyncio.sleep(120) 
                 continue
             
@@ -204,7 +195,7 @@ async def scraper_task(status_msg):
                 
                 if success:
                     count += 1
-                    wait = random.randint(40, 80) # Güvenli aralık
+                    wait = random.randint(40, 80)
                     await asyncio.sleep(wait)
             
             logger.info("Sayfa bitti, mola...")
