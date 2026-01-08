@@ -3,3 +3,5 @@ telethon
 requests
 beautifulsoup4
 asyncio
+cloudscraper
+fake-useragent
