@@ -184,44 +184,69 @@ async def process_link(link):
         logger.error(f"Hata: {e}")
         return False
 
-# ==================== CANLI GÖREV YÖNETİCİSİ ====================
+# ==================== GÜVENLİ GÖREV YÖNETİCİSİ (SİGORTALI) ====================
 
 async def scraper_task(status_msg):
     global CURRENT_CONFIG
     
+    # Hata sayacı (Sigorta)
+    consecutive_errors = 0 
+    MAX_RETRIES = 3  # Kaç kere üst üste hata verirse dursun?
+
     await status_msg.edit(f"🚀 **Sistem Başlatıldı!**\nHedef: `{CURRENT_CONFIG['current_url']}`")
     
     while CURRENT_CONFIG["is_running"]:
         try:
             # 1. TARAMA AŞAMASI
-            await status_msg.edit(f"🌍 **Siteye Bağlanılıyor...**\n`{CURRENT_CONFIG['current_url']}`\n\n_Headerlar Türkçe ayarlandı..._")
+            await status_msg.edit(f"🌍 **Siteye Bağlanılıyor...**\n`{CURRENT_CONFIG['current_url']}`\n\n_Deneme: {consecutive_errors + 1}/{MAX_RETRIES}_")
             
             links = scrape_site(CURRENT_CONFIG["current_url"])
             history = load_history()
             
+            # --- SİGORTA KONTROLÜ ---
+            if not links:
+                consecutive_errors += 1
+                logger.warning(f"⚠️ Hata Sayacı: {consecutive_errors}/{MAX_RETRIES}")
+                
+                if consecutive_errors >= MAX_RETRIES:
+                    # FİŞİ ÇEKME ANI
+                    CURRENT_CONFIG["is_running"] = False
+                    error_msg = (
+                        f"🛑 **ACİL DURDURMA!**\n\n"
+                        f"Hedef site ({CURRENT_CONFIG['current_url']}) üst üste {MAX_RETRIES} kez yanıt vermedi veya link bulunamadı.\n"
+                        f"Bot kendini korumaya aldı ve kapandı."
+                    )
+                    await status_msg.edit(error_msg)
+                    await bot.send_message(OWNER_ID, error_msg)
+                    return # Fonksiyondan komple çık
+                
+                # Henüz limit dolmadıysa bekle ve tekrar dene
+                await status_msg.edit(f"⚠️ **Hata/Link Yok!**\nSite yanıt vermedi ({consecutive_errors}/{MAX_RETRIES}).\n2 dakika bekleniyor...")
+                await asyncio.sleep(120) 
+                continue
+            
+            # Eğer buraya geldiyse link bulmuştur, sayacı sıfırla
+            consecutive_errors = 0
+            
             new_links = [l for l in links if l not in history]
             
             if not new_links:
-                await status_msg.edit(f"💤 **Yeni Link Bulunamadı.**\n\nSite içeriği taranıyor ama taze link yok.\n2 dakika mola veriliyor...")
+                await status_msg.edit(f"💤 **Taze Link Yok.**\nSite çalışıyor ama yeni grup düşmemiş.\n2 dakika mola...")
                 await asyncio.sleep(120) 
                 continue
             
             total_links = len(new_links)
             success_count = 0
             
-            # 2. İŞLEME AŞAMASI (Progress Bar Burada)
+            # 2. İŞLEME AŞAMASI
             for i, link in enumerate(new_links, 1):
                 if not CURRENT_CONFIG["is_running"]: break
                 
-                # Her 3 linkte bir veya işlemin başında/sonunda durumu güncelle
                 if i % 3 == 1 or i == total_links:
                     bar = make_progress_bar(i, total_links)
                     await status_msg.edit(
-                        f"⚙️ **Linkler İşleniyor...**\n\n"
-                        f"{bar}\n"
-                        f"🔢 Durum: `{i}/{total_links}`\n"
-                        f"✅ Başarılı: `{success_count}`\n"
-                        f"🔗 Şu anki: `{link}`"
+                        f"⚙️ **İşleniyor...**\n{bar}\n"
+                        f"🔢 `{i}/{total_links}` | ✅ `{success_count}`"
                     )
                 
                 success = await process_link(link)
@@ -229,16 +254,17 @@ async def scraper_task(status_msg):
                 if success:
                     success_count += 1
                     wait = random.randint(30, 60)
-                    await asyncio.sleep(wait) # Doğal bekleme
+                    await asyncio.sleep(wait)
                 else:
-                    await asyncio.sleep(5) # Hatalıysa hızlı geç
+                    await asyncio.sleep(5)
 
-            await status_msg.edit(f"🏁 **Sayfa Tamamlandı!**\n\nToplam `{success_count}` grup gruba eklendi.\nBot 10 dakika dinlenmeye çekiliyor...")
+            await status_msg.edit(f"🏁 **Tur Tamamlandı!**\nToplam `{success_count}` grup eklendi.\n10 dakika mola...")
             await asyncio.sleep(600)
             
         except Exception as e:
-            logger.error(f"Döngü hatası: {e}")
-            await status_msg.edit(f"⚠️ **Kritik Hata:** {e}\nBot kendini 1 dakika sonra yeniden başlatacak.")
+            logger.error(f"Kritik Hata: {e}")
+            consecutive_errors += 1 # Kritik hatayı da sayaca ekle
+            await status_msg.edit(f"⚠️ **Yazılım Hatası:** {e}\nTekrar deneniyor...")
             await asyncio.sleep(60)
     
     await bot.send_message(OWNER_ID, "🛑 **Tarama Durduruldu.**")
