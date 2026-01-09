@@ -191,7 +191,7 @@ async def scraper_task(status_msg):
     
     # Hata sayacı (Sigorta)
     consecutive_errors = 0 
-    MAX_RETRIES = 3  # Kaç kere üst üste hata verirse dursun?
+    MAX_RETRIES = 1  # Kaç kere üst üste hata verirse dursun?
 
     await status_msg.edit(f"🚀 **Sistem Başlatıldı!**\nHedef: `{CURRENT_CONFIG['current_url']}`")
     
