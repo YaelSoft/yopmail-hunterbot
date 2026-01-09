@@ -1,249 +1,180 @@
-import re
 import os
 import logging
 import asyncio
 import random
+import re
 import time
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
-
-# ARAMA MOTORU KÜTÜPHANESİ
 from duckduckgo_search import DDGS
 
 # ==================== AYARLAR ====================
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-
-# 🔥 TURBO AYARI: Kaç tane link bulunca dursun?
 HEDEF_LINK_SAYISI = 50 
 
 # Loglama
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger("SearchBot")
 
-# Web Server (Render İçin)
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Search Bot Online 🟢"
+def home(): return "Bot Calisiyor"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-# Bot Başlatma
 client = TelegramClient("search_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# ==================== GLOBAL HAFIZA ====================
-CONFIG = {
-    "target_chat_id": None,  
-    "target_topic_id": None, 
-    "is_running": False,
-    "current_keyword": ""
-}
-
+CONFIG = {"target_chat_id": None, "target_topic_id": None, "is_running": False, "current_keyword": ""}
 HISTORY_FILE = "sent_links.txt"
-
-# ==================== YARDIMCI FONKSİYONLAR ====================
 
 def load_history():
     if not os.path.exists(HISTORY_FILE): return set()
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f)
+    with open(HISTORY_FILE, "r", encoding="utf-8") as f: return set(line.strip() for line in f)
 
 def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{link}\n")
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
 
 def parse_topic_link(link):
-    """Linkten ID'leri süzer"""
     link = link.strip().replace("https://", "").replace("t.me/", "")
     parts = link.split("/")
-    
     try:
-        if "c/" in link: # Private: c/123456/100
+        if "c/" in link:
             chat_id = int("-100" + link.split("c/")[1].split("/")[0])
             topic_id = int(parts[-1])
             return chat_id, topic_id
-        else: 
-            return None, None
-    except:
         return None, None
+    except: return None, None
 
-# ==================== GELİŞMİŞ ARAMA MOTORU (REGEX MODU) ====================
+# ==================== YENİ ARAMA MOTORU ====================
 
 def search_web(keyword):
-    """Web'de tarama yapar ve metin içindeki gizli linkleri Regex ile söker"""
     links = []
-    found_urls = set() # Aynı linki tekrar eklememek için
-
-    # Daha geniş sorgular (Facebook/Twitter yerine genel tarama daha verimli olabilir)
-    queries = [
-        f'site:t.me "{keyword}"',
-        f'"t.me/+" "{keyword}"',
-        f'"{keyword}" "t.me/joinchat"',
-        f'"{keyword}" "Telegram grubu"',
-        f'site:facebook.com "{keyword}" "t.me"',
-        f'site:instagram.com "{keyword}" "t.me"',
-        f'site:vk.com "{keyword}" "t.me"'
-    ]
+    found_urls = set()
     
-    # TELEGRAM LİNKİNİ BULAN SİHİRLİ REGEX
-    # Bu kod, bir metnin içinde "t.me/blabla" gördüğü an yakalar.
-    telegram_regex = re.compile(r'(https?://t\.me/(?:joinchat/|\+)?[\w\d_]+)')
+    # "t.me" içeren her şeyi bulmaya çalışacağız
+    # Regex Güncellemesi: http zorunluluğunu kaldırdık, (?:https?://)? yaptık.
+    telegram_regex = re.compile(r'(?:https?://)?(?:www\.)?t\.me/(?:joinchat/|\+)?([\w\d_]+)')
+
+    queries = [
+        f'"{keyword}" site:t.me',
+        f'"{keyword}" "t.me/joinchat"',
+        f'"{keyword}" "t.me/+"',
+        f'"{keyword}" "Telegram kanalı"',
+        f'site:facebook.com "{keyword}" "t.me"',
+        f'site:instagram.com "{keyword}" "t.me"'
+    ]
 
     try:
+        # max_results=50 yaptık, daha çok veri çeksin
         with DDGS() as ddgs:
             for q in queries:
-                # Sonuçları çekiyoruz
-                results = list(ddgs.text(q, region='tr-tr', safesearch='off', max_results=25))
+                logger.info(f"Sorgu yapılıyor: {q}")
+                results = list(ddgs.text(q, region='tr-tr', safesearch='off', max_results=30))
                 
+                if not results:
+                    logger.warning(f"Sorgu boş döndü: {q}")
+
                 for res in results:
-                    # Linki hem başlıkta, hem linkte, hem de açıklamada arayacağız
-                    search_content = f"{res.get('href', '')} {res.get('title', '')} {res.get('body', '')}"
-                    
-                    # Regex ile metnin içindeki TÜM t.me linklerini bul
-                    matches = telegram_regex.findall(search_content)
+                    # Hata ayıklama için botun ne gördüğünü yazdırıyoruz
+                    # logger.info(f"HAM VERİ: {res.get('href')} - {res.get('title')}")
+
+                    combined_text = f"{res.get('href', '')} {res.get('title', '')} {res.get('body', '')}"
+                    matches = telegram_regex.findall(combined_text)
                     
                     for match in matches:
-                        clean_link = match.strip()
+                        # Regex sadece username'i yakalayabilir, linki biz tamamlayalım
+                        clean_link = f"https://t.me/{match}"
                         
-                        # Temizlik ve Filtreleme
-                        if clean_link not in found_urls:
-                            # Sonunda nokta, virgül varsa temizle
-                            clean_link = clean_link.rstrip(".,)!?")
-                            
-                            # Hatalı/Gereksiz linkleri ele (Örn: t.me/s/.. kanalların web önizlemesidir)
-                            if "/s/" in clean_link or clean_link.endswith("t.me"):
-                                continue
+                        # Filtreleme (Botlar, stickeler vb. hariç)
+                        if match.lower() in ["s", "share", "addstickers", "proxy", "socks"]: continue
+                        if len(match) < 4: continue # Çok kısa isimler genelde çöp olur
 
+                        if clean_link not in found_urls:
                             found_urls.add(clean_link)
                             links.append({"url": clean_link, "title": res.get('title', 'Bulunan Link')})
-                            
-        # Karıştır ki hep aynı sırayla gitmesin
-        list_links = list(links)
-        random.shuffle(list_links)
-        return list_links
+                            logger.info(f"✅ BULUNDU VE EKLENDİ: {clean_link}")
+
+        random.shuffle(links)
+        return links
         
     except Exception as e:
-        logger.error(f"Arama hatası: {e}")
+        logger.error(f"Arama Motoru Hatası: {e}")
         return []
-# ==================== ANA MOTOR (LEECH TASK) ====================
-# Burası senin eski kodda eksik olan kısımdı, baştan yazdım.
 
 async def leech_task(status_msg, keyword):
     history = load_history()
-    toplanan_sayisi = 0 # Sayaç sıfırdan başlar
+    toplanan = 0
     
     while CONFIG["is_running"]:
-        # 1. Limit Kontrolü
-        if toplanan_sayisi >= HEDEF_LINK_SAYISI:
-            await status_msg.respond(f"🏁 **HEDEF TAMAMLANDI!**\nToplam {toplanan_sayisi} yeni link bulundu ve durduruldu.")
+        if toplanan >= HEDEF_LINK_SAYISI:
+            await status_msg.respond(f"🏁 Hedef ({HEDEF_LINK_SAYISI}) tamamlandı.")
             CONFIG["is_running"] = False
             break
 
-        # 2. Arama Yap
-        await status_msg.edit(f"🔍 **{keyword}** aranıyor... (Bulunan: {toplanan_sayisi}/{HEDEF_LINK_SAYISI})")
+        await status_msg.edit(f"🔍 **{keyword}** aranıyor... (Bulunan: {toplanan}/{HEDEF_LINK_SAYISI})")
         new_links = search_web(keyword)
         
-        yeni_bulunanlar = []
-        
-        # 3. Linkleri Filtrele
+        gonderilecekler = []
         for item in new_links:
-            link = item["url"]
-            if link not in history:
-                yeni_bulunanlar.append(item)
-                history.add(link)
-                save_history(link)
+            if item["url"] not in history:
+                gonderilecekler.append(item)
+                history.add(item["url"])
+                save_history(item["url"])
 
-        # 4. Sonuç Yoksa Hızlı Geç (TURBO)
-        if not yeni_bulunanlar:
-            await status_msg.edit(f"⚠️ Bu turda yeni link yok. Hızla tekrar deneniyor...")
-            await asyncio.sleep(5) # Eskiden 120 saniyeydi, şimdi 5 saniye
+        if not gonderilecekler:
+            logger.info("Bu turda yeni link bulunamadı, 10sn bekleniyor...")
+            await asyncio.sleep(10)
             continue
 
-        # 5. Linkleri Gruba Gönder
-        for item in yeni_bulunanlar:
-            if not CONFIG["is_running"]: break # Acil durdurma kontrolü
-            if toplanan_sayisi >= HEDEF_LINK_SAYISI: break # Döngü içi limit kontrolü
-
-            msg_text = (
-                f"🎯 **Yeni Link Bulundu!**\n"
-                f"🔗 Link: {item['url']}\n"
-                f"📝 Başlık: {item['title']}\n"
-                f"🔎 Kelime: #{keyword}"
-            )
+        for item in gonderilecekler:
+            if not CONFIG["is_running"]: break
             
             try:
-                # Hedef konuya mesaj at
                 await client.send_message(
                     entity=CONFIG["target_chat_id"],
-                    message=msg_text,
+                    message=f"🔗 {item['url']}\n📝 {item['title']}\n#{keyword}",
                     reply_to=CONFIG["target_topic_id"]
                 )
-                toplanan_sayisi += 1
-                await asyncio.sleep(2) # Flood yememek için 2 saniye ara
-                
+                toplanan += 1
+                logger.info(f"Mesaj gönderildi: {item['url']}")
+                await asyncio.sleep(3)
             except Exception as e:
-                logger.error(f"Gönderme hatası: {e}")
+                logger.error(f"Gönderim hatası: {e}")
 
-    await status_msg.respond("🛑 İşlem sonlandırıldı.")
-
-# ==================== KOMUTLAR ====================
+    await status_msg.respond("🛑 Durduruldu.")
 
 @client.on(events.NewMessage(pattern='/start'))
-async def start_cmd(event):
-    await event.respond(
-        "👋 **Turbo Link Avcısı**\n\n"
-        "1️⃣ `/hedef https://t.me/c/xxxx/123` ile hedef ayarla.\n"
-        "2️⃣ `/basla <kelime>` ile aramayı başlat.\n"
-        f"3️⃣ Bot {HEDEF_LINK_SAYISI} link bulunca otomatik durur."
-    )
+async def start_cmd(event): await event.respond("Bot Hazır.\n/hedef ve /basla komutlarını kullan.")
 
 @client.on(events.NewMessage(pattern='/hedef'))
 async def set_target(event):
     try:
         link = event.message.text.split()[1]
-        chat_id, topic_id = parse_topic_link(link)
-        
-        if chat_id and topic_id:
-            CONFIG["target_chat_id"] = chat_id
-            CONFIG["target_topic_id"] = topic_id
-            await event.respond(f"✅ Hedef Ayarlandı!\nGrup: `{chat_id}`\nKonu: `{topic_id}`")
-        else:
-            await event.respond("❌ Hatalı Link! Sadece `t.me/c/..` formatlı özel grup linki kabul edilir.")
-    except IndexError:
-        await event.respond("❌ Link girmedin.")
+        c, t = parse_topic_link(link)
+        if c: 
+            CONFIG["target_chat_id"], CONFIG["target_topic_id"] = c, t
+            await event.respond("✅ Hedef Tamam.")
+        else: await event.respond("❌ Hatalı link.")
+    except: await event.respond("❌ Link gir.")
 
 @client.on(events.NewMessage(pattern='/basla'))
 async def start_leech_cmd(event):
-    if not CONFIG["target_chat_id"]:
-        await event.respond("⚠️ Önce `/hedef` ayarla!")
-        return
-        
-    if CONFIG["is_running"]:
-        await event.respond(f"⚠️ Zaten çalışıyor.")
-        return
-
+    if not CONFIG["target_chat_id"]: return await event.respond("⚠️ Hedef seç.")
+    if CONFIG["is_running"]: return await event.respond("⚠️ Zaten çalışıyor.")
     try:
-        keyword = event.message.text.split(" ", 1)[1]
-        CONFIG["current_keyword"] = keyword
-        CONFIG["is_running"] = True
-        
-        status_msg = await event.respond(f"🚀 **{keyword}** için Turbo Mod başlatılıyor...")
-        # Ana motoru burada çağırıyoruz
-        asyncio.create_task(leech_task(status_msg, keyword))
-        
-    except IndexError:
-        await event.respond("❌ Kelime girmedin. Örn: `/basla kripto`")
+        kw = event.message.text.split(" ", 1)[1]
+        CONFIG["current_keyword"], CONFIG["is_running"] = kw, True
+        msg = await event.respond("🚀 Başlıyor...")
+        asyncio.create_task(leech_task(msg, kw))
+    except: await event.respond("❌ Kelime gir.")
 
 @client.on(events.NewMessage(pattern='/dur'))
 async def stop_leech(event):
-    if not CONFIG["is_running"]:
-        await event.respond("💤 Zaten durmuş.")
-        return
-    
     CONFIG["is_running"] = False
-    await event.respond("🛑 Durduruluyor... (Mevcut gönderim bitince duracak)")
+    await event.respond("🛑 Durduruluyor.")
 
 if __name__ == '__main__':
     keep_alive()
