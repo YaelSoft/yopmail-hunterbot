@@ -3,10 +3,11 @@ import logging
 import asyncio
 import re
 import time
+import urllib.parse # Şifreli Google linklerini çözmek için
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
-from curl_cffi import requests as cureq # Bot engeli aşan özel kütüphane
+from curl_cffi import requests as cureq
 
 # ==================== AYARLAR ====================
 API_ID = int(os.environ.get("API_ID", 12345))
@@ -20,7 +21,7 @@ logger = logging.getLogger("ScraperBot")
 # Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Manuel Modda 🟢"
+def home(): return "Bot Google Modunda 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
@@ -49,35 +50,44 @@ def parse_topic_link(link):
         return None, None
     except: return None, None
 
-# ==================== SAYFA KAZIYICI (SADECE AL VE GİT) ====================
+# ==================== GOOGLE & BING KAZIYICI ====================
 
 def scrape_page_source(url):
     """
-    Verilen URL'ye gider, HTML kodunu indirir ve t.me linklerini Regex ile çeker.
+    Verilen URL'ye gider, içeriği çözer (decode) ve linkleri toplar.
     """
     found_links = set()
     
-    # Regex: t.me ile başlayan her şeyi yakalar (joinchat, +, normal username)
-    # En agresif regex budur.
+    # Regex: t.me linklerini yakalar
     regex = re.compile(r'https?://t\.me/(?:joinchat/|\+)?[\w\d_\-]+')
 
     try:
         logger.info(f"🌍 Sayfaya gidiliyor: {url}")
         
-        # Chrome taklidi yaparak siteye gir (Bing Engelini Aşmak İçin)
-        response = cureq.get(url, impersonate="chrome110", timeout=15)
+        # Chrome taklidi yaparak siteye gir
+        # headers ekledik ki Google bizi bot sanıp "Cookie sayfası"na atmasın
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+        
+        response = cureq.get(url, impersonate="chrome110", headers=headers, timeout=20)
         
         if response.status_code == 200:
-            content = response.text
-            # Sayfanın tamamında "t.me" ara
-            matches = regex.findall(content)
+            # 1. Ham içeriği al
+            raw_content = response.text
+            
+            # 2. KRİTİK ADIM: Google'ın şifreli linklerini (%3A %2F) normal yazıya çevir
+            decoded_content = urllib.parse.unquote(raw_content)
+            
+            # 3. Şimdi temizlenmiş metinde arama yap
+            matches = regex.findall(decoded_content)
             
             for match in matches:
-                # Temizlik
-                clean_link = match.strip().rstrip('.,")\'')
+                clean_link = match.strip().rstrip('.,")\'<>&;') # Google bazen linkin sonuna & koyar
                 
-                # Yasaklı kelime filtresi (İsteğe bağlı, şimdilik kapattım her şeyi alsın)
-                ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv"]
+                # Yasaklı kelime filtresi
+                ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv", "google", "search"]
                 if any(x in clean_link for x in ignore): continue
                 
                 found_links.add(clean_link)
@@ -95,9 +105,9 @@ def scrape_page_source(url):
 @client.on(events.NewMessage(pattern='/start'))
 async def start_cmd(event):
     await event.respond(
-        "👋 **Manuel Link Toplayıcı**\n\n"
-        "1️⃣ `/hedef <GRUP_LINKI>` -> Önce linklerin atılacağı yeri seç.\n"
-        "2️⃣ `/tara <URL>` -> Bing veya Google arama linkini yapıştır, ben içini boşaltayım."
+        "👋 **Google & Bing Avcısı**\n\n"
+        "1️⃣ `/hedef <GRUP_LINKI>`\n"
+        "2️⃣ `/tara <GOOGLE_LINKI>`"
     )
 
 @client.on(events.NewMessage(pattern='/hedef'))
@@ -118,19 +128,16 @@ async def manual_scan(event):
         return
 
     try:
-        # Linki al (Mesajdaki 2. parça ve sonrası, bazen link uzun olabilir)
         url_to_scrape = event.message.text.split(" ", 1)[1]
+        msg = await event.respond(f"⏳ **Google taranıyor...**\nLink: {url_to_scrape[:50]}...")
         
-        msg = await event.respond(f"⏳ **Bağlanılıyor:** {url_to_scrape}\nLütfen bekle...")
-        
-        # İşlemi başlat
         links = scrape_page_source(url_to_scrape)
         
         if not links:
-            await msg.edit("❌ Bu sayfadan link çıkarılamadı.\nYa sayfa bot korumalı ya da link yok.")
+            await msg.edit("❌ Link bulunamadı. Google 'Robot musun?' kontrolüne takılmış olabilir.")
             return
 
-        await msg.edit(f"✅ **{len(links)}** adet link bulundu! Gönderiliyor...")
+        await msg.edit(f"✅ **{len(links)}** link bulundu! Atılıyor...")
         
         history = load_history()
         count = 0
@@ -147,18 +154,18 @@ async def manual_scan(event):
                     history.add(link)
                     save_history(link)
                     count += 1
-                    await asyncio.sleep(2) # Flood yememek için 2 saniye bekle
+                    await asyncio.sleep(2) 
                 except Exception as e:
                     logger.error(f"Gönderme hatası: {e}")
         
         await client.send_message(
             entity=CONFIG["target_chat_id"],
-            message=f"🏁 **İşlem Tamamlandı!**\nToplam {count} yeni link eklendi.",
+            message=f"🏁 **Bitti!** Toplam {count} yeni link.",
             reply_to=CONFIG["target_topic_id"]
         )
 
     except IndexError:
-        await event.respond("❌ Link girmedin.\nÖrnek: `/tara https://www.bing.com/search?q=...`")
+        await event.respond("❌ Link girmedin.")
     except Exception as e:
         await event.respond(f"⚠️ Hata: {e}")
 
