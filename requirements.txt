@@ -1,7 +1,4 @@
 Flask
 telethon
-requests
-beautifulsoup4
 asyncio
-cloudscraper
-fake-useragent
+duckduckgo-search
