@@ -1,5 +1,6 @@
 flask
 telethon
-ddgs>=6.0.0
+duckduckgo-search
 curl_cffi
 lxml
+h11
