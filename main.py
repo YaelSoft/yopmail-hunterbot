@@ -83,37 +83,38 @@ def parse_topic_link(link):
     except:
         return None, None
 
-# ==================== ARAMA MOTORU (AVCI) ====================
+# ==================== ARAMA MOTORU (TÜRKİYE MODU) ====================
 
 def search_web(keyword):
-    """Web'de hem açık hem gizli linkleri arar"""
+    """Web'de DuckDuckGo ile Türkiye odaklı arama yapar"""
     links = []
     
-    # Dorking Sorguları (Hem public hem joinchat)
+    # Dorking Sorguları
     queries = [
-        f'site:t.me "{keyword}"',           # Genel arama
-        f'site:t.me joinchat "{keyword}"',  # Gizli linkler
-        f'"t.me/+" "{keyword}"',            # Yeni tip gizli linkler
-        f'telegram group "{keyword}"'       # Genel başlık
+        f'site:t.me joinchat "{keyword}"',
+        f'"t.me/+" "{keyword}"',
+        f'site:facebook.com "t.me/joinchat" "{keyword}"',
+        f'site:twitter.com "t.me/+" "{keyword}"'
     ]
     
     try:
+        # region='tr-tr' ekleyerek Türk sonuçlarını zorluyoruz
+        # safesearch='off' ile +18 dahil her şeyi açıyoruz
         with DDGS() as ddgs:
             for q in queries:
-                # Her sorgudan 20-30 tane çekelim
-                results = list(ddgs.text(q, max_results=30, safesearch='off'))
+                # timelimit='m' (Son 1 ay) ekleyerek TAZE linkleri bulabilirsin
+                # ya da timelimit=None yapıp hepsini alabilirsin.
+                results = list(ddgs.text(q, region='tr-tr', safesearch='off', max_results=40))
+                
                 for res in results:
                     url = res.get('href', '')
                     title = res.get('title', 'Başlık Yok')
                     
                     if "t.me/" in url:
-                        # Gereksiz mesaj linklerini temizle (t.me/x/123 gibi)
                         clean = url.split("?")[0].strip()
-                        # Eğer link çok uzunsa veya mesaj linkiyse ele (Basit filtre)
                         if clean.count("/") <= 4:
                             links.append({"url": clean, "title": title})
                             
-        # Karıştır ki hep aynı kaynak gelmesin
         random.shuffle(links)
         return links
         
