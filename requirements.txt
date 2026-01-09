@@ -3,4 +3,5 @@ telethon
 duckduckgo-search
 curl_cffi
 lxml
-h11
+requests
+beautifulsoup4
