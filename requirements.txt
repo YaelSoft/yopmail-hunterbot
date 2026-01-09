@@ -1,4 +1,3 @@
 flask
 telethon
-curl_cffi
-beautifulsoup4
+requests
