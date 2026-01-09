@@ -1,4 +1,5 @@
 Flask
 telethon
 asyncio
+requests
 duckduckgo-search
