@@ -122,94 +122,21 @@ def search_web(keyword):
         logger.error(f"Arama hatası: {e}")
         return []
 
-# ==================== GÖREV DÖNGÜSÜ ====================
+# --- ESKİ HALİ ---
+            # if not new_items:
+            #     await status_msg.edit(f"💤 **{keyword}** için yeni link yok.\n2 dakika mola veriliyor...")
+            #     await asyncio.sleep(120)
+            #     continue
 
-async def leech_task(status_msg, keyword):
-    global CONFIG
-    
-    # Başlangıç Bilgisi
-    await status_msg.edit(
-        f"🔎 **Arama Başlatıldı: {keyword}**\n\n"
-        f"🎯 Hedef Grup ID: `{CONFIG['target_chat_id']}`\n"
-        f"📂 Hedef Konu ID: `{CONFIG['target_topic_id']}`\n\n"
-        f"_İnternet taranıyor, lütfen bekleyin..._"
-    )
-    
-    while CONFIG["is_running"]:
-        try:
-            # 1. ARAMA YAP
-            found_items = search_web(keyword)
-            history = load_history()
-            
-            # Yeni olanları ayıkla
-            new_items = [i for i in found_items if i['url'] not in history]
-            
+            # --- YENİ (TURBO) HALİ ---
             if not new_items:
-                await status_msg.edit(f"💤 **{keyword}** için yeni link bulunamadı.\n2 dakika mola veriliyor...")
-                await asyncio.sleep(120)
-                continue
-            
-            # 2. GÖNDERİM SÜRECİ
-            total = len(new_items)
-            sent_count = 0
-            
-            await status_msg.edit(f"✅ **{total} Link Bulundu!**\nGruba aktarım başlıyor...")
-            
-            for i, item in enumerate(new_items, 1):
-                if not CONFIG["is_running"]: break
-                
-                link = item['url']
-                title = item['title']
-                
-                # Mesaj Şablonu
-                msg_text = (
-                    f"🌐 **Web'den Bulundu**\n"
-                    f"🔍 Kelime: `#{keyword}`\n"
-                    f"📝 Başlık: {title}\n"
-                    f"🔗 **Link:** {link}"
+                await status_msg.edit(
+                    f"⚠️ **{keyword}** boş çıktı.\n"
+                    f"⚡ Zaman kaybetmeden diğer kelimeye geçiliyor..."
                 )
-                
-                try:
-                    # HEDEFE GÖNDER
-                    await bot.send_message(
-                        CONFIG["target_chat_id"],
-                        msg_text,
-                        reply_to=CONFIG["target_topic_id"], # Topic içine atar
-                        link_preview=False # Önizleme kapalı (Hızlı olsun)
-                    )
-                    save_history(link)
-                    sent_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Gönderim hatası: {e}")
-                    # Eğer bot gruba erişemiyorsa durdur
-                    if "CHAT_WRITE_FORBIDDEN" in str(e):
-                        await status_msg.edit("❌ **HATA:** Botun o grupta mesaj atma yetkisi yok!")
-                        CONFIG["is_running"] = False
-                        return
-
-                # Durum Çubuğunu Güncelle (Her 3 mesajda bir)
-                if i % 3 == 0 or i == total:
-                    bar = make_progress_bar(i, total)
-                    await status_msg.edit(
-                        f"🚀 **Aktarılıyor: {keyword}**\n\n"
-                        f"{bar}\n"
-                        f"📦 Durum: `{i}/{total}`\n"
-                        f"✅ Başarılı: `{sent_count}`"
-                    )
-                
-                # Spam koruması (10-20 sn bekle)
-                await asyncio.sleep(random.randint(10, 20))
-            
-            await status_msg.edit(f"🏁 **Tur Bitti!**\nToplam `{sent_count}` link atıldı.\n5 dakika dinlenip tekrar arayacağım...")
-            await asyncio.sleep(300)
-            
-        except Exception as e:
-            logger.error(f"Task hatası: {e}")
-            await asyncio.sleep(60)
-            
-    await status_msg.edit("🛑 **İşlem Durduruldu.**")
-
+                # Sadece 5 saniye bekle ki Arama Motoru bizi banlamasın
+                await asyncio.sleep(5) 
+                continue
 # ==================== KOMUTLAR ====================
 
 @bot.on(events.NewMessage(pattern='/start'))
