@@ -2,102 +2,73 @@ import os
 import logging
 import asyncio
 import re
-import time
-import urllib.parse # Şifreli Google linklerini çözmek için
+import urllib.parse
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
-from curl_cffi import requests as cureq
 
 # ==================== AYARLAR ====================
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+# Hedef Kanal Ayarları (Hafıza)
+CONFIG = {"target_chat_id": None, "target_topic_id": None}
+
 # Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("ScraperBot")
+logger = logging.getLogger("HtmlHunter")
 
-# Web Server
+# Web Server (Render İçin)
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Google Modunda 🟢"
+def home(): return "Bot Dosya Modunda 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
 # Bot Başlatma
-client = TelegramClient("scraper_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+client = TelegramClient("html_hunter", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Hafıza
-CONFIG = {"target_chat_id": None, "target_topic_id": None}
-HISTORY_FILE = "sent_links.txt"
-
-def load_history():
-    if not os.path.exists(HISTORY_FILE): return set()
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f: return set(line.strip() for line in f)
-
-def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
+# ==================== YARDIMCI FONKSİYONLAR ====================
 
 def parse_topic_link(link):
     link = link.strip().replace("https://", "").replace("t.me/", "")
-    parts = link.split("/")
     try:
         if "c/" in link:
-            chat_id = int("-100" + link.split("c/")[1].split("/")[0])
-            topic_id = int(parts[-1])
+            parts = link.split("c/")[1].split("/")
+            chat_id = int("-100" + parts[0])
+            topic_id = int(parts[1]) if len(parts) > 1 else None
             return chat_id, topic_id
-        return None, None
-    except: return None, None
+    except: pass
+    return None, None
 
-# ==================== GOOGLE & BING KAZIYICI ====================
-
-def scrape_page_source(url):
-    """
-    Verilen URL'ye gider, içeriği çözer (decode) ve linkleri toplar.
-    """
+def extract_links_from_html(file_path):
+    """İndirilen HTML dosyasının içindeki t.me linklerini bulur"""
     found_links = set()
     
-    # Regex: t.me linklerini yakalar
-    regex = re.compile(r'https?://t\.me/(?:joinchat/|\+)?[\w\d_\-]+')
-
+    # Dosyayı oku (utf-8 hatası verirse latin-1 dener)
     try:
-        logger.info(f"🌍 Sayfaya gidiliyor: {url}")
-        
-        # Chrome taklidi yaparak siteye gir
-        # headers ekledik ki Google bizi bot sanıp "Cookie sayfası"na atmasın
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
-        }
-        
-        response = cureq.get(url, impersonate="chrome110", headers=headers, timeout=20)
-        
-        if response.status_code == 200:
-            # 1. Ham içeriği al
-            raw_content = response.text
-            
-            # 2. KRİTİK ADIM: Google'ın şifreli linklerini (%3A %2F) normal yazıya çevir
-            decoded_content = urllib.parse.unquote(raw_content)
-            
-            # 3. Şimdi temizlenmiş metinde arama yap
-            matches = regex.findall(decoded_content)
-            
-            for match in matches:
-                clean_link = match.strip().rstrip('.,")\'<>&;') # Google bazen linkin sonuna & koyar
-                
-                # Yasaklı kelime filtresi
-                ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv", "google", "search"]
-                if any(x in clean_link for x in ignore): continue
-                
-                found_links.add(clean_link)
-                logger.info(f"✅ BULUNDU: {clean_link}")
-        else:
-            logger.warning(f"❌ Siteye girilemedi! Kod: {response.status_code}")
-            
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
     except Exception as e:
-        logger.error(f"❌ Hata oluştu: {e}")
+        return []
 
+    # Google linkleri şifreli olur (%3A%2F), onları düzelt
+    decoded_content = urllib.parse.unquote(content)
+
+    # Regex: t.me linklerini affetmez
+    regex = re.compile(r'https?://(?:www\.)?t\.me/(?:joinchat/|\+)?[\w\d_\-]+')
+    
+    matches = regex.findall(decoded_content)
+    for match in matches:
+        clean = match.strip().rstrip('.,"\';<>&)')
+        
+        # Filtreler
+        ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv", "google", "search"]
+        if any(x in clean.lower() for x in ignore): continue
+        
+        found_links.add(clean)
+        
     return list(found_links)
 
 # ==================== KOMUTLAR ====================
@@ -105,9 +76,14 @@ def scrape_page_source(url):
 @client.on(events.NewMessage(pattern='/start'))
 async def start_cmd(event):
     await event.respond(
-        "👋 **Google & Bing Avcısı**\n\n"
-        "1️⃣ `/hedef <GRUP_LINKI>`\n"
-        "2️⃣ `/tara <GOOGLE_LINKI>`"
+        "👋 **Anti-Ban Link Sökücü**\n\n"
+        "Google/Bing botları engellediği için taktik değiştirdik.\n\n"
+        "**Nasıl Kullanılır?**\n"
+        "1️⃣ `/hedef <LİNK>` ile hedef grubu seç.\n"
+        "2️⃣ Google'da aramanı yap, sayfayı aşağı kaydır.\n"
+        "3️⃣ **Sağ Tık -> Farklı Kaydet** (veya Ctrl+S) yap.\n"
+        "4️⃣ İnen `.html` dosyasını bana gönder.\n\n"
+        "Dosyayı attığın an içindeki tüm linkleri sökerim!"
     )
 
 @client.on(events.NewMessage(pattern='/hedef'))
@@ -117,57 +93,65 @@ async def set_target(event):
         c, t = parse_topic_link(link)
         if c: 
             CONFIG["target_chat_id"], CONFIG["target_topic_id"] = c, t
-            await event.respond("✅ Hedef Ayarlandı.")
-        else: await event.respond("❌ Link Hatalı.")
-    except: await event.respond("❌ Link girmelisin.")
+            await event.respond("✅ Hedef Ayarlandı. Şimdi dosyayı at.")
+        else: await event.respond("❌ Link Hatalı (Özel grup linki olmalı).")
+    except: await event.respond("❌ Link girmedin.")
 
-@client.on(events.NewMessage(pattern='/tara'))
-async def manual_scan(event):
+# ==================== DOSYA YAKALAYICI ====================
+
+@client.on(events.NewMessage)
+async def file_handler(event):
+    # Sadece dosya varsa ve HTML ise çalış
+    if not event.document: return
+    
+    # Dosya ismini kontrol et (.html veya .htm)
+    file_name = event.file.name or ""
+    if not file_name.endswith(('.html', '.htm')): return
+
     if not CONFIG["target_chat_id"]:
-        await event.respond("⚠️ Önce `/hedef` belirle!")
+        await event.reply("⚠️ Önce `/hedef` belirle!")
         return
 
+    msg = await event.reply("📥 **Dosya İnceleniyor...**")
+    
     try:
-        url_to_scrape = event.message.text.split(" ", 1)[1]
-        msg = await event.respond(f"⏳ **Google taranıyor...**\nLink: {url_to_scrape[:50]}...")
+        # Dosyayı sunucuya indir
+        path = await event.download_media()
         
-        links = scrape_page_source(url_to_scrape)
+        # İçini tara
+        links = extract_links_from_html(path)
+        
+        # Dosyayı sil (yer kaplamasın)
+        os.remove(path)
         
         if not links:
-            await msg.edit("❌ Link bulunamadı. Google 'Robot musun?' kontrolüne takılmış olabilir.")
+            await msg.edit("❌ Bu dosyada Telegram linki bulunamadı.")
             return
 
-        await msg.edit(f"✅ **{len(links)}** link bulundu! Atılıyor...")
+        await msg.edit(f"✅ **{len(links)}** link bulundu! Gönderiliyor...")
         
-        history = load_history()
         count = 0
-        
         for link in links:
-            if link not in history:
-                try:
-                    await client.send_message(
-                        entity=CONFIG["target_chat_id"],
-                        message=link,
-                        reply_to=CONFIG["target_topic_id"],
-                        link_preview=False
-                    )
-                    history.add(link)
-                    save_history(link)
-                    count += 1
-                    await asyncio.sleep(2) 
-                except Exception as e:
-                    logger.error(f"Gönderme hatası: {e}")
-        
+            try:
+                await client.send_message(
+                    entity=CONFIG["target_chat_id"],
+                    message=link,
+                    reply_to=CONFIG["target_topic_id"],
+                    link_preview=False
+                )
+                count += 1
+                await asyncio.sleep(2) # Flood yememek için
+            except Exception as e:
+                logger.error(f"Hata: {e}")
+
         await client.send_message(
-            entity=CONFIG["target_chat_id"],
-            message=f"🏁 **Bitti!** Toplam {count} yeni link.",
-            reply_to=CONFIG["target_topic_id"]
+            entity=event.chat_id,
+            message=f"🏁 **Tamamlandı!** Toplam {count} link yollandı."
         )
 
-    except IndexError:
-        await event.respond("❌ Link girmedin.")
     except Exception as e:
-        await event.respond(f"⚠️ Hata: {e}")
+        await msg.edit(f"⚠️ Bir hata oldu: {e}")
+        if os.path.exists(path): os.remove(path)
 
 if __name__ == '__main__':
     keep_alive()
