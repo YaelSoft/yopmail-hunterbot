@@ -1,38 +1,34 @@
 import os
 import logging
 import asyncio
-import random
+import re
 import time
-import urllib3
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
-from duckduckgo_search import DDGS
+from curl_cffi import requests as cureq # Bot engeli aşan özel kütüphane
 
 # ==================== AYARLAR ====================
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-HEDEF_LINK_SAYISI = 50 
-
-# Loglama (Gözümüzle görelim ne buluyor)
+# Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("SearchBot")
-# Gereksizleri sustur
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-logging.getLogger("httpx").setLevel(logging.ERROR)
-urllib3.disable_warnings()
+logger = logging.getLogger("ScraperBot")
 
+# Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Basit Modda 🟢"
+def home(): return "Bot Manuel Modda 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-client = TelegramClient("search_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# Bot Başlatma
+client = TelegramClient("scraper_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-CONFIG = {"target_chat_id": None, "target_topic_id": None, "is_running": False, "current_keyword": ""}
+# Hafıza
+CONFIG = {"target_chat_id": None, "target_topic_id": None}
 HISTORY_FILE = "sent_links.txt"
 
 def load_history():
@@ -53,135 +49,56 @@ def parse_topic_link(link):
         return None, None
     except: return None, None
 
-# ==================== ARAMA MOTORU (DİREKT ADRES OKUMA) ====================
+# ==================== SAYFA KAZIYICI (SADECE AL VE GİT) ====================
 
-def search_web(keyword):
-    final_links = []
+def scrape_page_source(url):
+    """
+    Verilen URL'ye gider, HTML kodunu indirir ve t.me linklerini Regex ile çeker.
+    """
+    found_links = set()
     
-    # SENİN DEDİĞİN GİBİ: Direkt t.me linklerini hedefliyoruz.
-    # site:t.me demek "Bana sadece Telegram linklerini getir" demektir.
-    queries = [
-        f'site:t.me "{keyword}"',          # Direkt telegram linkleri
-        f'site:t.me "{keyword}" chat',     # Sohbetler
-        f'"{keyword}" t.me joinchat',      # Katılma linkleri
-        f'"{keyword}" t.me/+'              # Özel linkler
-    ]
-
-    logger.info(f"👀 '{keyword}' için linkler toplanıyor...")
+    # Regex: t.me ile başlayan her şeyi yakalar (joinchat, +, normal username)
+    # En agresif regex budur.
+    regex = re.compile(r'https?://t\.me/(?:joinchat/|\+)?[\w\d_\-]+')
 
     try:
-        with DDGS() as ddgs:
-            for q in queries:
-                if not CONFIG["is_running"]: break
-
-                try:
-                    # max_results'ı 50 yaptık, tek seferde çok alsın
-                    results = list(ddgs.text(q, region='tr-tr', safesearch='off', backend='html', max_results=50))
-                except Exception as e:
-                    logger.warning(f"⚠️ Arama hatası: {e}")
-                    time.sleep(3)
-                    continue
-                
-                if not results:
-                    logger.warning(f"⚠️ BU SORGU BOŞ DÖNDÜ (Ban Riski): {q}")
-
-                for res in results:
-                    # BURASI SENİN DEDİĞİN YER
-                    # Linkin kendisine (href) bakıyoruz.
-                    link = res.get('href', '')
-                    title = res.get('title', '')
-                    
-                    # LOG: Botun tam olarak ne bulduğunu yazdıralım
-                    # logger.info(f"BULUNAN HAM LİNK: {link}") 
-
-                    # 1. Linkin kendisi t.me ise AL
-                    if "t.me/" in link:
-                        clean_link = link.split("?")[0] # Soru işaretinden sonrasını at
-                        final_links.append({"url": clean_link, "title": title})
-                        logger.info(f"✅ HEDEF VURULDU: {clean_link}")
-                    
-                    # 2. Başlıkta veya açıklamada link geçiyor mu?
-                    # Bazen link 'google.com/...' olur ama açıklamasında 't.me/grup' yazar.
-                    else:
-                        snippet = f"{title} {res.get('body', '')}"
-                        if "t.me/" in snippet:
-                            # Basitçe metnin içinden t.me... kısmını kesip alalım
-                            import re
-                            found = re.findall(r'(https?://t\.me/[\w\d_\+]+)', snippet)
-                            for f in found:
-                                final_links.append({"url": f, "title": f"Yazıdan: {title}"})
-                                logger.info(f"✅ YAZIDAN ALINDI: {f}")
-
-                time.sleep(1)
-
-        return final_links
+        logger.info(f"🌍 Sayfaya gidiliyor: {url}")
         
-    except Exception as e:
-        logger.error(f"Genel Hata: {e}")
-        return []
-
-# ==================== GÖREV DÖNGÜSÜ ====================
-
-async def leech_task(status_msg, keyword):
-    history = load_history()
-    toplanan = 0
-    fail_count = 0
-    
-    while CONFIG["is_running"]:
-        if toplanan >= HEDEF_LINK_SAYISI:
-            await status_msg.respond(f"🏁 Görev Bitti! {toplanan} link bulundu.")
-            CONFIG["is_running"] = False
-            break
-
-        try:
-            await status_msg.edit(f"🔍 **{keyword}** taranıyor... ({toplanan}/{HEDEF_LINK_SAYISI})")
-        except: pass
-
-        new_links = search_web(keyword)
+        # Chrome taklidi yaparak siteye gir (Bing Engelini Aşmak İçin)
+        response = cureq.get(url, impersonate="chrome110", timeout=15)
         
-        if not CONFIG["is_running"]: break
-
-        gonderilecekler = []
-        for item in new_links:
-            # Filtreler (Gereksiz sistem linkleri)
-            ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv"]
-            if any(x in item["url"] for x in ignore): continue
-
-            if item["url"] not in history:
-                gonderilecekler.append(item)
-                history.add(item["url"])
-                save_history(item["url"])
-
-        if not gonderilecekler:
-            fail_count += 1
-            logger.info(f"Taze link yok. ({fail_count}. deneme)")
-            await asyncio.sleep(5)
-            continue
-        
-        fail_count = 0 
-
-        for item in gonderilecekler:
-            if not CONFIG["is_running"]: break
-            if toplanan >= HEDEF_LINK_SAYISI: break
+        if response.status_code == 200:
+            content = response.text
+            # Sayfanın tamamında "t.me" ara
+            matches = regex.findall(content)
             
-            try:
-                # Linki at
-                await client.send_message(
-                    entity=CONFIG["target_chat_id"],
-                    message=f"{item['url']}",
-                    reply_to=CONFIG["target_topic_id"],
-                    link_preview=False
-                )
-                toplanan += 1
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Gönderim hatası: {e}")
+            for match in matches:
+                # Temizlik
+                clean_link = match.strip().rstrip('.,")\'')
+                
+                # Yasaklı kelime filtresi (İsteğe bağlı, şimdilik kapattım her şeyi alsın)
+                ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv"]
+                if any(x in clean_link for x in ignore): continue
+                
+                found_links.add(clean_link)
+                logger.info(f"✅ BULUNDU: {clean_link}")
+        else:
+            logger.warning(f"❌ Siteye girilemedi! Kod: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Hata oluştu: {e}")
 
-    await status_msg.respond("🛑 Durdu.")
+    return list(found_links)
 
 # ==================== KOMUTLAR ====================
+
 @client.on(events.NewMessage(pattern='/start'))
-async def start_cmd(event): await event.respond("Bot Hazır. /hedef ve /basla")
+async def start_cmd(event):
+    await event.respond(
+        "👋 **Manuel Link Toplayıcı**\n\n"
+        "1️⃣ `/hedef <GRUP_LINKI>` -> Önce linklerin atılacağı yeri seç.\n"
+        "2️⃣ `/tara <URL>` -> Bing veya Google arama linkini yapıştır, ben içini boşaltayım."
+    )
 
 @client.on(events.NewMessage(pattern='/hedef'))
 async def set_target(event):
@@ -190,26 +107,60 @@ async def set_target(event):
         c, t = parse_topic_link(link)
         if c: 
             CONFIG["target_chat_id"], CONFIG["target_topic_id"] = c, t
-            await event.respond("✅ Hedef Tamam.")
-        else: await event.respond("❌ Hatalı Link.")
-    except: await event.respond("❌ Link yok.")
+            await event.respond("✅ Hedef Ayarlandı.")
+        else: await event.respond("❌ Link Hatalı.")
+    except: await event.respond("❌ Link girmelisin.")
 
-@client.on(events.NewMessage(pattern='/basla'))
-async def start_leech_cmd(event):
-    if not CONFIG["target_chat_id"]: return await event.respond("⚠️ Hedef yok.")
-    if CONFIG["is_running"]: return await event.respond("⚠️ Zaten çalışıyor.")
+@client.on(events.NewMessage(pattern='/tara'))
+async def manual_scan(event):
+    if not CONFIG["target_chat_id"]:
+        await event.respond("⚠️ Önce `/hedef` belirle!")
+        return
+
     try:
-        kw = event.message.text.split(" ", 1)[1]
-        CONFIG["current_keyword"], CONFIG["is_running"] = kw, True
-        msg = await event.respond(f"🚀 **{kw}** için linkler toplanıyor...")
-        asyncio.create_task(leech_task(msg, kw))
-    except: await event.respond("❌ Kelime yok.")
+        # Linki al (Mesajdaki 2. parça ve sonrası, bazen link uzun olabilir)
+        url_to_scrape = event.message.text.split(" ", 1)[1]
+        
+        msg = await event.respond(f"⏳ **Bağlanılıyor:** {url_to_scrape}\nLütfen bekle...")
+        
+        # İşlemi başlat
+        links = scrape_page_source(url_to_scrape)
+        
+        if not links:
+            await msg.edit("❌ Bu sayfadan link çıkarılamadı.\nYa sayfa bot korumalı ya da link yok.")
+            return
 
-@client.on(events.NewMessage(pattern='/dur'))
-async def stop_leech(event):
-    if not CONFIG["is_running"]: return await event.respond("💤 Zaten duruk.")
-    CONFIG["is_running"] = False
-    await event.respond("🛑 Durduruluyor...")
+        await msg.edit(f"✅ **{len(links)}** adet link bulundu! Gönderiliyor...")
+        
+        history = load_history()
+        count = 0
+        
+        for link in links:
+            if link not in history:
+                try:
+                    await client.send_message(
+                        entity=CONFIG["target_chat_id"],
+                        message=link,
+                        reply_to=CONFIG["target_topic_id"],
+                        link_preview=False
+                    )
+                    history.add(link)
+                    save_history(link)
+                    count += 1
+                    await asyncio.sleep(2) # Flood yememek için 2 saniye bekle
+                except Exception as e:
+                    logger.error(f"Gönderme hatası: {e}")
+        
+        await client.send_message(
+            entity=CONFIG["target_chat_id"],
+            message=f"🏁 **İşlem Tamamlandı!**\nToplam {count} yeni link eklendi.",
+            reply_to=CONFIG["target_topic_id"]
+        )
+
+    except IndexError:
+        await event.respond("❌ Link girmedin.\nÖrnek: `/tara https://www.bing.com/search?q=...`")
+    except Exception as e:
+        await event.respond(f"⚠️ Hata: {e}")
 
 if __name__ == '__main__':
     keep_alive()
