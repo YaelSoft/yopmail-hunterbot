@@ -3,65 +3,43 @@ import logging
 import asyncio
 import random
 import time
-import math
-import cloudscraper 
-from fake_useragent import UserAgent
-from bs4 import BeautifulSoup
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError, UsernameInvalidError, ChannelPrivateError
+
+# ARAMA MOTORU KÜTÜPHANESİ
+from duckduckgo_search import DDGS
 
 # ==================== AYARLAR ====================
-API_ID = int(os.environ.get("API_ID", 0))
+# Burayı doldur, gerisine karışma.
+API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SESSION_STRING = os.environ.get("SESSION_STRING", "")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-
-DEFAULT_TARGET_ID = int(os.environ.get("TARGET_GROUP_ID", -1003598285370))
 
 # Loglama
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("TurboScraper")
+logger = logging.getLogger("SearchBot")
 
-# Web Server
+# Web Server (Render İçin)
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Turbo Bot Online 🚀"
+def home(): return "Search Bot Online 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-# Global Durum
-CURRENT_CONFIG = {
-    "target_id": DEFAULT_TARGET_ID,
+# Bot Başlatma
+bot = TelegramClient("search_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+# ==================== GLOBAL HAFIZA ====================
+# Bot ayarları burada tutulur (Restart atınca sıfırlanır, tekrar ayarlarsın)
+CONFIG = {
+    "target_chat_id": None,  # Hedef Grup ID
+    "target_topic_id": None, # Hedef Konu ID
     "is_running": False,
-    "current_url": None
+    "current_keyword": ""
 }
 
 HISTORY_FILE = "sent_links.txt"
-
-# Topic Haritası (Senin ID'ler)
-TOPIC_MAP = {
-    "yazilim": 2, "ticaret": 4, "kripto": 51, 
-    "haber": 8, "ifsa": 10, "random": 1
-}
-
-KEYWORDS = {
-    "yazilim": ["java", "python", "kodlama", "yazılım", "hack", "script", "php", "bot", "developer"],
-    "ticaret": ["satış", "fiyat", "dolap", "letgo", "indirim", "kupon", "ticaret", "pazar", "market", "toptan", "2.el", "sahibinden"],
-    "kripto": ["bitcoin", "btc", "eth", "coin", "borsa", "analiz", "forex", "usdt", "mining"],
-    "haber": ["sondakika", "haber", "gündem", "siyaset", "gazete"],
-    "ifsa": ["link", "arsiv", "twerk", "tiktok", "onlyfans", "yetiskin", "nsfw", "18+", "kız", "liseli"]
-}
-
-# Clientlar
-bot = TelegramClient("manager_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-if SESSION_STRING:
-    userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-else:
-    userbot = TelegramClient("worker_userbot", API_ID, API_HASH)
 
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
@@ -74,231 +52,227 @@ def save_history(link):
     with open(HISTORY_FILE, "a", encoding="utf-8") as f:
         f.write(f"{link}\n")
 
-def determine_topic(title, bio):
-    full_text = f"{title} {bio}".lower()
-    for cat, keys in KEYWORDS.items():
-        for key in keys:
-            if key in full_text: return cat, TOPIC_MAP.get(cat)
-    return "Diğer", TOPIC_MAP["random"]
-
-def make_progress_bar(current, total, length=10):
-    """Görsel İlerleme Çubuğu Oluşturur"""
+def make_progress_bar(current, total, length=12):
+    """Görsel çubuk oluşturur: [████░░░░] %50"""
     if total == 0: total = 1
     percent = current / total
-    filled_length = int(length * percent)
-    bar = "█" * filled_length + "░" * (length - filled_length)
+    filled = int(length * percent)
+    bar = "█" * filled + "░" * (length - filled)
     return f"[{bar}] %{int(percent * 100)}"
 
-# ==================== GÜÇLENDİRİLMİŞ SCRAPER (TÜRKÇE HEADER) ====================
+def parse_topic_link(link):
+    """Kullanıcının attığı linkten ID'leri süzer"""
+    # Link tipleri: 
+    # https://t.me/c/123456789/100 (Özel grup)
+    # https://t.me/username/100 (Genel grup)
+    link = link.strip().replace("https://", "").replace("t.me/", "")
+    parts = link.split("/")
+    
+    try:
+        if "c/" in link: # Private: c/123456/100
+            chat_id = int("-100" + link.split("c/")[1].split("/")[0])
+            topic_id = int(parts[-1])
+            return chat_id, topic_id
+        else: # Public: username/100
+            # Public gruplarda username'i ID olarak kullanamayız, resolve gerekir.
+            # Ancak kullanıcıya "Botu gruba ekle" dediğimiz için chat_id'yi eventten alabiliriz.
+            # Şimdilik sadece Private link desteği (en garantisi) veya username.
+            username = parts[0]
+            topic_id = int(parts[1])
+            return username, topic_id
+    except:
+        return None, None
 
-def scrape_site(url):
+# ==================== ARAMA MOTORU (AVCI) ====================
+
+def search_web(keyword):
+    """Web'de hem açık hem gizli linkleri arar"""
     links = []
     
-    # Cloudscraper ayarları
-    scraper = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-    )
-
-    # TÜRKÇE HEADERLAR (403/404 Çözümü)
-    headers = {
-        "User-Agent": UserAgent().random,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com.tr/",
-        "Upgrade-Insecure-Requests": "1"
-    }
-
+    # Dorking Sorguları (Hem public hem joinchat)
+    queries = [
+        f'site:t.me "{keyword}"',           # Genel arama
+        f'site:t.me joinchat "{keyword}"',  # Gizli linkler
+        f'"t.me/+" "{keyword}"',            # Yeni tip gizli linkler
+        f'telegram group "{keyword}"'       # Genel başlık
+    ]
+    
     try:
-        logger.info(f"🥷 Siteye sızılıyor: {url}")
-        response = scraper.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Erişim hatası: {response.status_code}")
-            return []
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Link Avcısı
-        found_raw = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "t.me/" in href and "joinchat" not in href:
-                found_raw.append(href)
-        
-        # Buton Avcısı
-        for btn in soup.select("a.btn, a.button, div.button, a.tg-btn"):
-             href = btn.get("href")
-             if href and "t.me/" in href:
-                 found_raw.append(href)
-
-        # Temizle ve Eşsizleştir
-        for link in found_raw:
-            clean = link.split("?")[0].strip()
-            if clean not in links: links.append(clean)
-
+        with DDGS() as ddgs:
+            for q in queries:
+                # Her sorgudan 20-30 tane çekelim
+                results = list(ddgs.text(q, max_results=30, safesearch='off'))
+                for res in results:
+                    url = res.get('href', '')
+                    title = res.get('title', 'Başlık Yok')
+                    
+                    if "t.me/" in url:
+                        # Gereksiz mesaj linklerini temizle (t.me/x/123 gibi)
+                        clean = url.split("?")[0].strip()
+                        # Eğer link çok uzunsa veya mesaj linkiyse ele (Basit filtre)
+                        if clean.count("/") <= 4:
+                            links.append({"url": clean, "title": title})
+                            
+        # Karıştır ki hep aynı kaynak gelmesin
         random.shuffle(links)
         return links
-
+        
     except Exception as e:
-        logger.error(f"❌ Scrape patladı: {e}")
+        logger.error(f"Arama hatası: {e}")
         return []
 
-async def process_link(link):
-    try:
-        username = link.split("t.me/")[-1].replace("@", "")
-        if not username: return False
+# ==================== GÖREV DÖNGÜSÜ ====================
 
-        entity = await userbot.get_entity(username)
-        real_title = entity.title or "İsimsiz"
-        real_bio = getattr(entity, 'about', '') or ""
-        
-        cat_name, topic_id = determine_topic(real_title, real_bio)
-        
-        msg = (
-            f"🔍 **Grup Analiz Edildi**\n\n"
-            f"📛 **İsim:** {real_title}\n"
-            f"📂 **Kategori:** #{cat_name}\n"
-            f"📝 **Bio:** {real_bio[:100]}...\n\n"
-            f"🔗 **Link:** {link}"
-        )
-        
-        await userbot.send_message(
-            CURRENT_CONFIG["target_id"],
-            msg,
-            reply_to=topic_id,
-            link_preview=False
-        )
-        
-        save_history(link)
-        logger.info(f"Gönderildi: {real_title}")
-        return True
-
-    except (UsernameInvalidError, ChannelPrivateError):
-        save_history(link) # Bozuk linki kaydet ki bir daha denemesin
-        return False
-    except FloodWaitError as e:
-        logger.warning(f"FloodWait: {e.seconds}s")
-        await asyncio.sleep(e.seconds + 10)
-        return False
-    except Exception as e:
-        logger.error(f"Hata: {e}")
-        return False
-
-# ==================== GÜVENLİ GÖREV YÖNETİCİSİ (SİGORTALI) ====================
-
-async def scraper_task(status_msg):
-    global CURRENT_CONFIG
+async def leech_task(status_msg, keyword):
+    global CONFIG
     
-    # Hata sayacı (Sigorta)
-    consecutive_errors = 0 
-    MAX_RETRIES = 1  # Kaç kere üst üste hata verirse dursun?
-
-    await status_msg.edit(f"🚀 **Sistem Başlatıldı!**\nHedef: `{CURRENT_CONFIG['current_url']}`")
+    # Başlangıç Bilgisi
+    await status_msg.edit(
+        f"🔎 **Arama Başlatıldı: {keyword}**\n\n"
+        f"🎯 Hedef Grup ID: `{CONFIG['target_chat_id']}`\n"
+        f"📂 Hedef Konu ID: `{CONFIG['target_topic_id']}`\n\n"
+        f"_İnternet taranıyor, lütfen bekleyin..._"
+    )
     
-    while CURRENT_CONFIG["is_running"]:
+    while CONFIG["is_running"]:
         try:
-            # 1. TARAMA AŞAMASI
-            await status_msg.edit(f"🌍 **Siteye Bağlanılıyor...**\n`{CURRENT_CONFIG['current_url']}`\n\n_Deneme: {consecutive_errors + 1}/{MAX_RETRIES}_")
-            
-            links = scrape_site(CURRENT_CONFIG["current_url"])
+            # 1. ARAMA YAP
+            found_items = search_web(keyword)
             history = load_history()
             
-            # --- SİGORTA KONTROLÜ ---
-            if not links:
-                consecutive_errors += 1
-                logger.warning(f"⚠️ Hata Sayacı: {consecutive_errors}/{MAX_RETRIES}")
-                
-                if consecutive_errors >= MAX_RETRIES:
-                    # FİŞİ ÇEKME ANI
-                    CURRENT_CONFIG["is_running"] = False
-                    error_msg = (
-                        f"🛑 **ACİL DURDURMA!**\n\n"
-                        f"Hedef site ({CURRENT_CONFIG['current_url']}) üst üste {MAX_RETRIES} kez yanıt vermedi veya link bulunamadı.\n"
-                        f"Bot kendini korumaya aldı ve kapandı."
-                    )
-                    await status_msg.edit(error_msg)
-                    await bot.send_message(OWNER_ID, error_msg)
-                    return # Fonksiyondan komple çık
-                
-                # Henüz limit dolmadıysa bekle ve tekrar dene
-                await status_msg.edit(f"⚠️ **Hata/Link Yok!**\nSite yanıt vermedi ({consecutive_errors}/{MAX_RETRIES}).\n2 dakika bekleniyor...")
-                await asyncio.sleep(120) 
+            # Yeni olanları ayıkla
+            new_items = [i for i in found_items if i['url'] not in history]
+            
+            if not new_items:
+                await status_msg.edit(f"💤 **{keyword}** için yeni link bulunamadı.\n2 dakika mola veriliyor...")
+                await asyncio.sleep(120)
                 continue
             
-            # Eğer buraya geldiyse link bulmuştur, sayacı sıfırla
-            consecutive_errors = 0
+            # 2. GÖNDERİM SÜRECİ
+            total = len(new_items)
+            sent_count = 0
             
-            new_links = [l for l in links if l not in history]
+            await status_msg.edit(f"✅ **{total} Link Bulundu!**\nGruba aktarım başlıyor...")
             
-            if not new_links:
-                await status_msg.edit(f"💤 **Taze Link Yok.**\nSite çalışıyor ama yeni grup düşmemiş.\n2 dakika mola...")
-                await asyncio.sleep(120) 
-                continue
-            
-            total_links = len(new_links)
-            success_count = 0
-            
-            # 2. İŞLEME AŞAMASI
-            for i, link in enumerate(new_links, 1):
-                if not CURRENT_CONFIG["is_running"]: break
+            for i, item in enumerate(new_items, 1):
+                if not CONFIG["is_running"]: break
                 
-                if i % 3 == 1 or i == total_links:
-                    bar = make_progress_bar(i, total_links)
-                    await status_msg.edit(
-                        f"⚙️ **İşleniyor...**\n{bar}\n"
-                        f"🔢 `{i}/{total_links}` | ✅ `{success_count}`"
+                link = item['url']
+                title = item['title']
+                
+                # Mesaj Şablonu
+                msg_text = (
+                    f"🌐 **Web'den Bulundu**\n"
+                    f"🔍 Kelime: `#{keyword}`\n"
+                    f"📝 Başlık: {title}\n"
+                    f"🔗 **Link:** {link}"
+                )
+                
+                try:
+                    # HEDEFE GÖNDER
+                    await bot.send_message(
+                        CONFIG["target_chat_id"],
+                        msg_text,
+                        reply_to=CONFIG["target_topic_id"], # Topic içine atar
+                        link_preview=False # Önizleme kapalı (Hızlı olsun)
                     )
-                
-                success = await process_link(link)
-                
-                if success:
-                    success_count += 1
-                    wait = random.randint(30, 60)
-                    await asyncio.sleep(wait)
-                else:
-                    await asyncio.sleep(5)
+                    save_history(link)
+                    sent_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"Gönderim hatası: {e}")
+                    # Eğer bot gruba erişemiyorsa durdur
+                    if "CHAT_WRITE_FORBIDDEN" in str(e):
+                        await status_msg.edit("❌ **HATA:** Botun o grupta mesaj atma yetkisi yok!")
+                        CONFIG["is_running"] = False
+                        return
 
-            await status_msg.edit(f"🏁 **Tur Tamamlandı!**\nToplam `{success_count}` grup eklendi.\n10 dakika mola...")
-            await asyncio.sleep(600)
+                # Durum Çubuğunu Güncelle (Her 3 mesajda bir)
+                if i % 3 == 0 or i == total:
+                    bar = make_progress_bar(i, total)
+                    await status_msg.edit(
+                        f"🚀 **Aktarılıyor: {keyword}**\n\n"
+                        f"{bar}\n"
+                        f"📦 Durum: `{i}/{total}`\n"
+                        f"✅ Başarılı: `{sent_count}`"
+                    )
+                
+                # Spam koruması (10-20 sn bekle)
+                await asyncio.sleep(random.randint(10, 20))
+            
+            await status_msg.edit(f"🏁 **Tur Bitti!**\nToplam `{sent_count}` link atıldı.\n5 dakika dinlenip tekrar arayacağım...")
+            await asyncio.sleep(300)
             
         except Exception as e:
-            logger.error(f"Kritik Hata: {e}")
-            consecutive_errors += 1 # Kritik hatayı da sayaca ekle
-            await status_msg.edit(f"⚠️ **Yazılım Hatası:** {e}\nTekrar deneniyor...")
+            logger.error(f"Task hatası: {e}")
             await asyncio.sleep(60)
-    
-    await bot.send_message(OWNER_ID, "🛑 **Tarama Durduruldu.**")
+            
+    await status_msg.edit("🛑 **İşlem Durduruldu.**")
 
 # ==================== KOMUTLAR ====================
 
-@bot.on(events.NewMessage(pattern='/start', from_users=OWNER_ID))
+@bot.on(events.NewMessage(pattern='/start'))
 async def start_cmd(event):
-    await event.respond("👋 **Turbo Link Avcısı**\n\n`/basla <URL>`\n`/hedef <ID>`\n`/dur`")
+    await event.respond(
+        "👋 **Link Avcısı Bot**\n\n"
+        "**Nasıl Kullanılır?**\n"
+        "1️⃣ Botu grubuna ekle ve yönetici yap.\n"
+        "2️⃣ Linklerin atılacağı **Konunun (Topic)** bağlantısını kopyala.\n"
+        "3️⃣ Bana özelden: `/hedef https://t.me/c/xxxx/123` yaz.\n"
+        "4️⃣ Sonra: `/basla <kelime>` yaz.\n\n"
+        "Bu kadar! Gerisini ben hallederim."
+    )
 
-@bot.on(events.NewMessage(pattern='/hedef', from_users=OWNER_ID))
-async def set_target_cmd(event):
+@bot.on(events.NewMessage(pattern='/hedef'))
+async def set_target(event):
     try:
-        CURRENT_CONFIG["target_id"] = int(event.message.text.split()[1])
-        await event.respond(f"✅ Hedef: `{CURRENT_CONFIG['target_id']}`")
-    except: await event.respond("❌ Hata.")
+        link = event.message.text.split()[1]
+        chat_id, topic_id = parse_topic_link(link)
+        
+        if chat_id and topic_id:
+            CONFIG["target_chat_id"] = chat_id
+            CONFIG["target_topic_id"] = topic_id
+            await event.respond(
+                f"✅ **Hedef Ayarlandı!**\n\n"
+                f"📂 Grup ID: `{chat_id}`\n"
+                f"📌 Topic ID: `{topic_id}`\n\n"
+                f"Şimdi `/basla <kelime>` komutunu kullanabilirsin."
+            )
+        else:
+            await event.respond("❌ Linkten ID çözülemedi. Lütfen `t.me/c/..` formatında (özel grup) topic linki atın.\nBotun grupta olduğundan emin olun.")
+    except IndexError:
+        await event.respond("❌ Link girmelisin.\nÖrn: `/hedef https://t.me/c/123456/101`")
 
-@bot.on(events.NewMessage(pattern='/basla', from_users=OWNER_ID))
-async def start_scrape_cmd(event):
-    if CURRENT_CONFIG["is_running"]: await event.respond("⚠️ Çalışıyor zaten."); return
+@bot.on(events.NewMessage(pattern='/basla'))
+async def start_leech(event):
+    if not CONFIG["target_chat_id"]:
+        await event.respond("⚠️ Önce hedef belirlemelisin!\n`/hedef <TOPIC_LINKI>` komutunu kullan.")
+        return
+        
+    if CONFIG["is_running"]:
+        await event.respond(f"⚠️ Zaten çalışıyor: `{CONFIG['current_keyword']}`")
+        return
+
     try:
-        url = event.message.text.split()[1]
-        CURRENT_CONFIG["current_url"] = url
-        CURRENT_CONFIG["is_running"] = True
-        status = await event.respond("⏳ **Başlatılıyor...**")
-        asyncio.create_task(scraper_task(status))
-    except: await event.respond("❌ Link gir.")
+        keyword = event.message.text.split(" ", 1)[1]
+        CONFIG["current_keyword"] = keyword
+        CONFIG["is_running"] = True
+        
+        status_msg = await event.respond(f"⏳ **{keyword}** için motorlar ısınıyor...")
+        asyncio.create_task(leech_task(status_msg, keyword))
+        
+    except IndexError:
+        await event.respond("❌ Kelime girmedin.\nÖrn: `/basla ifsa` veya `/basla kripto`")
 
-@bot.on(events.NewMessage(pattern='/dur', from_users=OWNER_ID))
-async def stop_scrape_cmd(event):
-    CURRENT_CONFIG["is_running"] = False
-    await event.respond("🛑 Durduruluyor...")
+@bot.on(events.NewMessage(pattern='/dur'))
+async def stop_leech(event):
+    if not CONFIG["is_running"]:
+        await event.respond("💤 Zaten çalışmıyor.")
+        return
+    
+    CONFIG["is_running"] = False
+    await event.respond("🛑 Durdurma emri verildi. Mevcut işlem bitince duracak.")
 
 if __name__ == '__main__':
     keep_alive()
-    userbot.start()
     bot.run_until_disconnected()
