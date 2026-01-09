@@ -2,9 +2,7 @@ import os
 import logging
 import asyncio
 import random
-import re
 import time
-import requests
 import urllib3
 from threading import Thread
 from flask import Flask
@@ -18,22 +16,17 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 HEDEF_LINK_SAYISI = 50 
 
-# Yasaklı kelimeler (Yabancı/Gereksiz)
-YASAKLI_KELIMELER = [
-    "crypto", "forex", "bitcoin", "invest", "trading", "bet", 
-    "casino", "stock", "market", "english", "usa", "indian"
-]
-
-# Uyarıları Sustur
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Loglama (Gözümüzle görelim ne buluyor)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger("SearchBot")
+# Gereksizleri sustur
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.ERROR)
+urllib3.disable_warnings()
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Takip Modunda 🟢"
+def home(): return "Bot Basit Modda 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
@@ -60,78 +53,21 @@ def parse_topic_link(link):
         return None, None
     except: return None, None
 
-# ==================== YENİ: URL ÇÖZÜCÜ (REDIRECT FOLLOWER) ====================
-
-def resolve_redirects(url):
-    """
-    Linke tıklar, yönlendirmeleri takip eder ve SON adresi getirir.
-    Sayfa kaynağı boş olsa bile URL t.me ise yakalar.
-    """
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    try:
-        # allow_redirects=True: Bot linke tıklar ve sonuna kadar gider
-        response = requests.head(url, headers=headers, allow_redirects=True, timeout=5, verify=False)
-        final_url = response.url
-        
-        # Eğer son adres t.me ise Bingo!
-        if "t.me/" in final_url:
-            return final_url.split("?")[0]
-            
-    except:
-        # head isteği yemezse get isteği atalım (biraz daha yavaş ama garanti)
-        try:
-            response = requests.get(url, headers=headers, timeout=5, verify=False)
-            if "t.me/" in response.url:
-                return response.url.split("?")[0]
-        except:
-            pass
-            
-    return None
-
-def extract_telegram_links(text):
-    """Metin içindeki linkleri bulur (Regex)"""
-    found = set()
-    # GÜNCELLENMİŞ REGEX: + (Plus) linklerini ve joinchat'i kesin yakalar
-    regex = re.compile(r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)?([a-zA-Z0-9_\-]{4,})')
-    
-    matches = regex.findall(text)
-    for match in matches:
-        # Yasaklı kelime kontrolü
-        if any(bad in match.lower() for bad in YASAKLI_KELIMELER): continue
-        ignore = ["share", "addstickers", "proxy", "socks", "contact", "iv", "setlanguage", "telegram", "settings"]
-        if match.lower() in ignore: continue
-
-        # Linki yeniden inşa et
-        # Eğer match 'joinchat' ile başlamıyorsa ve '+' yoksa, normal kullanıcı adıdır.
-        # Ama regex zaten temizlediği için direkt ekleyebiliriz.
-        # Düzeltme: Regex grubu sadece ID kısmını alıyor, başını biz ekleyelim.
-        # Ancak + linkler için özel durum var.
-        
-        if text.find(f"+{match}") != -1: # Eğer orijinal metinde + varsa
-            full_link = f"https://t.me/+{match}"
-        elif text.find(f"joinchat/{match}") != -1:
-            full_link = f"https://t.me/joinchat/{match}"
-        else:
-            full_link = f"https://t.me/{match}"
-            
-        found.add(full_link)
-    return list(found)
-
-# ==================== ARAMA MOTORU ====================
+# ==================== ARAMA MOTORU (DİREKT ADRES OKUMA) ====================
 
 def search_web(keyword):
     final_links = []
-    visited_sites = set()
-
-    # Sen "site:t.me" dedin, o yüzden onu en başa koydum.
+    
+    # SENİN DEDİĞİN GİBİ: Direkt t.me linklerini hedefliyoruz.
+    # site:t.me demek "Bana sadece Telegram linklerini getir" demektir.
     queries = [
-        f'site:t.me "{keyword}" "chat"', 
-        f'site:t.me "{keyword}" "sohbet"',
-        f'"{keyword}" "t.me/+"', 
-        f'"{keyword}" "t.me/joinchat"'
+        f'site:t.me "{keyword}"',          # Direkt telegram linkleri
+        f'site:t.me "{keyword}" chat',     # Sohbetler
+        f'"{keyword}" t.me joinchat',      # Katılma linkleri
+        f'"{keyword}" t.me/+'              # Özel linkler
     ]
 
-    logger.info(f"🔍 '{keyword}' için link takibi yapılıyor...")
+    logger.info(f"👀 '{keyword}' için linkler toplanıyor...")
 
     try:
         with DDGS() as ddgs:
@@ -139,46 +75,49 @@ def search_web(keyword):
                 if not CONFIG["is_running"]: break
 
                 try:
-                    # backend='html' en iyi sonucu veriyor şu an
-                    results = list(ddgs.text(q, region='tr-tr', safesearch='off', backend='html', max_results=25))
-                except:
-                    time.sleep(2)
+                    # max_results'ı 50 yaptık, tek seferde çok alsın
+                    results = list(ddgs.text(q, region='tr-tr', safesearch='off', backend='html', max_results=50))
+                except Exception as e:
+                    logger.warning(f"⚠️ Arama hatası: {e}")
+                    time.sleep(3)
                     continue
+                
+                if not results:
+                    logger.warning(f"⚠️ BU SORGU BOŞ DÖNDÜ (Ban Riski): {q}")
 
                 for res in results:
-                    if not CONFIG["is_running"]: break
-
-                    # Arama sonucundaki linki al
-                    found_url = res.get('href', '')
+                    # BURASI SENİN DEDİĞİN YER
+                    # Linkin kendisine (href) bakıyoruz.
+                    link = res.get('href', '')
                     title = res.get('title', '')
                     
-                    # 1. YÖNTEM: Link zaten t.me ise DİREKT AL (Hiç uğraşma)
-                    if "t.me/" in found_url:
-                        clean = found_url.split("?")[0]
-                        final_links.append({"url": clean, "title": "Direkt Bulundu"})
-                        logger.info(f"✅ BULUNDU: {clean}")
-                        continue
+                    # LOG: Botun tam olarak ne bulduğunu yazdıralım
+                    # logger.info(f"BULUNAN HAM LİNK: {link}") 
+
+                    # 1. Linkin kendisi t.me ise AL
+                    if "t.me/" in link:
+                        clean_link = link.split("?")[0] # Soru işaretinden sonrasını at
+                        final_links.append({"url": clean_link, "title": title})
+                        logger.info(f"✅ HEDEF VURULDU: {clean_link}")
                     
-                    # 2. YÖNTEM: Link t.me değilse (Google yönlendirmesi vs.), TAKİP ET
-                    # "Tıklayınca o sayfa çıkıyor" dediğin olay burası.
-                    resolved_link = resolve_redirects(found_url)
-                    if resolved_link:
-                        final_links.append({"url": resolved_link, "title": f"Yönlendirme: {title}"})
-                        logger.info(f"🔀 YÖNLENDİRME ÇÖZÜLDÜ: {resolved_link}")
-                        continue
+                    # 2. Başlıkta veya açıklamada link geçiyor mu?
+                    # Bazen link 'google.com/...' olur ama açıklamasında 't.me/grup' yazar.
+                    else:
+                        snippet = f"{title} {res.get('body', '')}"
+                        if "t.me/" in snippet:
+                            # Basitçe metnin içinden t.me... kısmını kesip alalım
+                            import re
+                            found = re.findall(r'(https?://t\.me/[\w\d_\+]+)', snippet)
+                            for f in found:
+                                final_links.append({"url": f, "title": f"Yazıdan: {title}"})
+                                logger.info(f"✅ YAZIDAN ALINDI: {f}")
 
-                    # 3. YÖNTEM: Snippet (Özet Yazı) tarama
-                    # Bazen link başlıkta yazar ama href başkadır.
-                    snippet_links = extract_telegram_links(f"{title} {res.get('body', '')}")
-                    for l in snippet_links:
-                        final_links.append({"url": l, "title": f"Yazıdan: {title}"})
-
-                    time.sleep(0.5)
+                time.sleep(1)
 
         return final_links
         
     except Exception as e:
-        logger.error(f"Hata: {e}")
+        logger.error(f"Genel Hata: {e}")
         return []
 
 # ==================== GÖREV DÖNGÜSÜ ====================
@@ -190,12 +129,12 @@ async def leech_task(status_msg, keyword):
     
     while CONFIG["is_running"]:
         if toplanan >= HEDEF_LINK_SAYISI:
-            await status_msg.respond(f"🏁 Hedef tamam! {toplanan} link bulundu.")
+            await status_msg.respond(f"🏁 Görev Bitti! {toplanan} link bulundu.")
             CONFIG["is_running"] = False
             break
 
         try:
-            await status_msg.edit(f"🔗 **{keyword}** linkleri çözülüyor... ({toplanan}/{HEDEF_LINK_SAYISI})")
+            await status_msg.edit(f"🔍 **{keyword}** taranıyor... ({toplanan}/{HEDEF_LINK_SAYISI})")
         except: pass
 
         new_links = search_web(keyword)
@@ -204,6 +143,10 @@ async def leech_task(status_msg, keyword):
 
         gonderilecekler = []
         for item in new_links:
+            # Filtreler (Gereksiz sistem linkleri)
+            ignore = ["share", "socks", "proxy", "contact", "setlanguage", "iv"]
+            if any(x in item["url"] for x in ignore): continue
+
             if item["url"] not in history:
                 gonderilecekler.append(item)
                 history.add(item["url"])
@@ -211,7 +154,7 @@ async def leech_task(status_msg, keyword):
 
         if not gonderilecekler:
             fail_count += 1
-            logger.info(f"Link çıkmadı. ({fail_count}. deneme)")
+            logger.info(f"Taze link yok. ({fail_count}. deneme)")
             await asyncio.sleep(5)
             continue
         
@@ -222,6 +165,7 @@ async def leech_task(status_msg, keyword):
             if toplanan >= HEDEF_LINK_SAYISI: break
             
             try:
+                # Linki at
                 await client.send_message(
                     entity=CONFIG["target_chat_id"],
                     message=f"{item['url']}",
@@ -257,7 +201,7 @@ async def start_leech_cmd(event):
     try:
         kw = event.message.text.split(" ", 1)[1]
         CONFIG["current_keyword"], CONFIG["is_running"] = kw, True
-        msg = await event.respond(f"🚀 **{kw}** takip ediliyor...")
+        msg = await event.respond(f"🚀 **{kw}** için linkler toplanıyor...")
         asyncio.create_task(leech_task(msg, kw))
     except: await event.respond("❌ Kelime yok.")
 
