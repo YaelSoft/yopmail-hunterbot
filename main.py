@@ -5,6 +5,7 @@ import random
 import re
 import time
 import requests
+import urllib3
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events
@@ -15,24 +16,32 @@ API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Limit
 HEDEF_LINK_SAYISI = 50 
 
-# Loglama
+# ==================== FİLTRELER (PASAPORT KONTROLÜ) ====================
+
+# Bu kelimeler linkte veya başlıkta geçerse DİREKT ÇÖPE ATILIR
+YASAKLI_KELIMELER = [
+    "crypto", "forex", "bitcoin", "invest", "trading", "finance", "bet", 
+    "casino", "pump", "signal", "binance", "coin", "stock", "market", 
+    "global", "english", "usa", "russia", "china", "indian", "iran"
+]
+
+# Susturucu
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger("SearchBot")
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
 
-# Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot Avda 🟢"
+def home(): return "Bot Turkce Modda 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-# Bot Başlatma
 client = TelegramClient("search_bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Hafıza
 CONFIG = {"target_chat_id": None, "target_topic_id": None, "is_running": False, "current_keyword": ""}
 HISTORY_FILE = "sent_links.txt"
 
@@ -54,102 +63,112 @@ def parse_topic_link(link):
         return None, None
     except: return None, None
 
-# ==================== YARDIMCI: LİNK TEMİZLEME ====================
 def extract_telegram_links(text):
-    """
-    Bir metnin içindeki (HTML, Yazı, Snippet) tüm t.me linklerini bulur.
-    """
     found = set()
-    # Regex: t.me/xxx veya telegram.me/xxx (HTTP olması şart değil)
     regex = re.compile(r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/(?:joinchat/|\+)?([a-zA-Z0-9_]{4,})')
-    
     matches = regex.findall(text)
     for match in matches:
-        # Yasaklı kelimeler (System linkleri)
-        ignore = ["share", "addstickers", "proxy", "socks", "contact", "iv", "setlanguage", "telegram", "settings"]
+        ignore = ["share", "addstickers", "proxy", "socks", "contact", "iv", "setlanguage", "telegram", "settings", "status"]
         if match.lower() in ignore: continue
         
-        # Linki oluştur
+        # Ekstra Güvenlik: Username içinde yasaklı kelime var mı?
+        if any(bad in match.lower() for bad in YASAKLI_KELIMELER):
+            continue
+
         full_link = f"https://t.me/{match}"
         found.add(full_link)
-    
     return list(found)
 
-# ==================== SİTE İÇİ TARAMA ====================
 def dig_for_links(url):
-    """Siteye girip kaynak kodunu tarar"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         response = requests.get(url, headers=headers, timeout=8, verify=False)
-        if "t.me" in response.url: return [response.url.split("?")[0]]
+        # Sitedeki tüm metni al ve filtrele
         return extract_telegram_links(response.text)
     except:
         return []
 
-# ==================== ARAMA MOTORU ====================
+# ==================== TÜRKÇE ODAKLI ARAMA MOTORU ====================
 
 def search_web(keyword):
     final_links = []
     visited_sites = set()
 
-    # Dorking Sorguları
+    # SORGULARI DEĞİŞTİRDİK: Yabancı gelmemesi için Türkçe kelimeler ekledik
     queries = [
-        f'"{keyword}" t.me',
-        f'"{keyword}" chat link',
-        f'"{keyword}" telegram grubu',
-        f'site:t.me "{keyword}"'
+        f'"{keyword}" "telegram grubu" -crypto -forex',  # "Grubu" kelimesi Türkçe zorunluluğu katar
+        f'site:t.me "{keyword}" "sohbet"',               # "Sohbet" kelimesi Türkçe zorunluluğu katar
+        f'"{keyword}" "t.me" türkiye',
+        f'"{keyword}" "whatsapp" "telegram" link'        # Genelde bu ikisi bir arada aranır
     ]
 
-    logger.info(f"🔍 '{keyword}' aranıyor...")
+    logger.info(f"🔍 '{keyword}' için TÜRKÇE kaynaklar taranıyor...")
 
     try:
         with DDGS() as ddgs:
             for q in queries:
+                if not CONFIG["is_running"]: break
+
                 try:
-                    # backend='api' en temiz veriyi verir
-                    results = list(ddgs.text(q, region='tr-tr', safesearch='off', backend='api', max_results=25))
-                except:
+                    results = list(ddgs.text(q, region='tr-tr', safesearch='off', backend='html', max_results=20))
+                except Exception as e:
                     time.sleep(2)
                     continue
 
                 for res in results:
-                    # ADIM 1: GÖZÜNLE GÖRDÜĞÜN YERİ TARA (SNIPPET SCAN)
-                    # Başlıkta veya açıklamada link varsa DİREKT AL, siteye gitme.
-                    snippet_text = f"{res.get('title', '')} {res.get('body', '')} {res.get('href', '')}"
+                    if not CONFIG["is_running"]: break
+
+                    title = res.get('title', '').lower()
+                    body = res.get('body', '').lower()
+                    site_url = res.get('href', '')
+
+                    # --- PASAPORT KONTROLÜ ---
+                    # Başlıkta veya açıklamada yasaklı kelime varsa DİREKT GEÇ
+                    if any(bad in title or bad in body for bad in YASAKLI_KELIMELER):
+                        logger.info(f"🚫 YASAKLI İÇERİK ENGELLENDİ: {title}")
+                        continue
+                    
+                    # --- 1. SNIPPET TARAMA ---
+                    snippet_text = f"{title} {body} {site_url}"
                     snippet_links = extract_telegram_links(snippet_text)
                     
                     if snippet_links:
                         for l in snippet_links:
-                            final_links.append({"url": l, "title": f"Hızlı Bulundu: {res.get('title')}"})
-                            logger.info(f"⚡ SNIPPET'TAN YAKALANDI: {l}")
-                        # Snippet'ta bulduysak siteye girmekle vakit kaybetmeyelim
+                            final_links.append({"url": l, "title": f"Hızlı: {res.get('title')}"})
                         continue 
 
-                    # ADIM 2: EĞER SNIPPET'TA YOKSA SİTEYE GİR (DEEP SCAN)
-                    site_url = res.get('href', '')
+                    # --- 2. SİTEYE GİRME ---
                     if site_url and site_url not in visited_sites:
-                        visited_sites.add(site_url)
                         
-                        # Eğer link zaten t.me ise
-                        if "t.me/" in site_url:
-                            l_clean = site_url.split("?")[0]
-                            final_links.append({"url": l_clean, "title": "Direkt Link"})
+                        # Site adresi bile yasaklı kelime içeriyorsa girme (örn: investing.com)
+                        if any(bad in site_url.lower() for bad in YASAKLI_KELIMELER):
                             continue
 
-                        # Değilse siteye gir
+                        visited_sites.add(site_url)
+                        
+                        if "t.me/" in site_url:
+                            # Direkt Telegram linki
+                            l_clean = site_url.split("?")[0]
+                            # Son bir kontrol
+                            if not any(bad in l_clean.lower() for bad in YASAKLI_KELIMELER):
+                                final_links.append({"url": l_clean, "title": "Direkt Link"})
+                            continue
+
+                        if not CONFIG["is_running"]: break
+
                         extracted = dig_for_links(site_url)
                         for ex_link in extracted:
-                            final_links.append({"url": ex_link, "title": f"Kaynak: {site_url}"})
+                            # Linkin kendisinde yasaklı kelime var mı?
+                            if not any(bad in ex_link.lower() for bad in YASAKLI_KELIMELER):
+                                final_links.append({"url": ex_link, "title": f"Web: {res.get('title')}"})
                         
-                        time.sleep(0.5) # IP ban yememek için bekleme
+                        time.sleep(0.5)
 
         return final_links
         
     except Exception as e:
-        logger.error(f"Arama Hatası: {e}")
+        logger.error(f"Hata: {e}")
         return []
-
-# ==================== GÖREV DÖNGÜSÜ ====================
 
 async def leech_task(status_msg, keyword):
     history = load_history()
@@ -158,16 +177,18 @@ async def leech_task(status_msg, keyword):
     
     while CONFIG["is_running"]:
         if toplanan >= HEDEF_LINK_SAYISI:
-            await status_msg.respond(f"🏁 Görev Bitti! {toplanan} link bulundu.")
+            await status_msg.respond(f"🏁 Bitti! {toplanan} temiz link bulundu.")
             CONFIG["is_running"] = False
             break
 
         try:
-            await status_msg.edit(f"🔥 **{keyword}** taranıyor... ({toplanan}/{HEDEF_LINK_SAYISI})")
+            await status_msg.edit(f"🇹🇷 **{keyword}** taranıyor... ({toplanan}/{HEDEF_LINK_SAYISI})")
         except: pass
 
         new_links = search_web(keyword)
         
+        if not CONFIG["is_running"]: break
+
         gonderilecekler = []
         for item in new_links:
             if item["url"] not in history:
@@ -177,7 +198,7 @@ async def leech_task(status_msg, keyword):
 
         if not gonderilecekler:
             fail_count += 1
-            logger.info(f"Bu turda link çıkmadı. ({fail_count}. deneme)")
+            logger.info(f"Temiz link yok. ({fail_count}. deneme)")
             await asyncio.sleep(5)
             continue
         
@@ -188,7 +209,6 @@ async def leech_task(status_msg, keyword):
             if toplanan >= HEDEF_LINK_SAYISI: break
             
             try:
-                # Linki direkt mesaj olarak atıyoruz, buton vs yok. Sade.
                 await client.send_message(
                     entity=CONFIG["target_chat_id"],
                     message=f"{item['url']}",
@@ -202,8 +222,7 @@ async def leech_task(status_msg, keyword):
 
     await status_msg.respond("🛑 Durdu.")
 
-# ==================== KOMUTLAR ====================
-
+# ==================== KOMUTLAR AYNI ====================
 @client.on(events.NewMessage(pattern='/start'))
 async def start_cmd(event): await event.respond("Bot Hazır. /hedef ve /basla")
 
@@ -215,24 +234,25 @@ async def set_target(event):
         if c: 
             CONFIG["target_chat_id"], CONFIG["target_topic_id"] = c, t
             await event.respond("✅ Hedef Tamam.")
-        else: await event.respond("❌ Link bozuk.")
+        else: await event.respond("❌ Hatalı Link.")
     except: await event.respond("❌ Link yok.")
 
 @client.on(events.NewMessage(pattern='/basla'))
 async def start_leech_cmd(event):
     if not CONFIG["target_chat_id"]: return await event.respond("⚠️ Hedef yok.")
-    if CONFIG["is_running"]: return await event.respond("⚠️ Çalışıyor.")
+    if CONFIG["is_running"]: return await event.respond("⚠️ Zaten çalışıyor.")
     try:
         kw = event.message.text.split(" ", 1)[1]
         CONFIG["current_keyword"], CONFIG["is_running"] = kw, True
-        msg = await event.respond(f"🚀 **{kw}** aranıyor...")
+        msg = await event.respond(f"🚀 **{kw}** için Türkçe kaynaklar taranıyor...")
         asyncio.create_task(leech_task(msg, kw))
     except: await event.respond("❌ Kelime yok.")
 
 @client.on(events.NewMessage(pattern='/dur'))
 async def stop_leech(event):
+    if not CONFIG["is_running"]: return await event.respond("💤 Zaten duruk.")
     CONFIG["is_running"] = False
-    await event.respond("🛑 Durdu.")
+    await event.respond("🛑 Durduruluyor...")
 
 if __name__ == '__main__':
     keep_alive()
