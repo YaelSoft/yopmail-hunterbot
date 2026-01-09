@@ -1,5 +1,5 @@
-Flask
+flask
 telethon
-asyncio
-requests
-duckduckgo-search
+duckduckgo-search>=6.0.0
+curl_cffi
+lxml
