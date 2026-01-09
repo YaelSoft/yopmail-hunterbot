@@ -1,7 +1,4 @@
 flask
 telethon
-duckduckgo-search
 curl_cffi
-lxml
-requests
 beautifulsoup4
