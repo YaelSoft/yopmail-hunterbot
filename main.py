@@ -1,3 +1,4 @@
+import re
 import os
 import logging
 import asyncio
@@ -68,45 +69,64 @@ def parse_topic_link(link):
     except:
         return None, None
 
-# ==================== ARAMA MOTORU ====================
+# ==================== GELİŞMİŞ ARAMA MOTORU (REGEX MODU) ====================
 
 def search_web(keyword):
-    """Web'de DuckDuckGo ile arama yapar"""
+    """Web'de tarama yapar ve metin içindeki gizli linkleri Regex ile söker"""
     links = []
-    
-    # Facebook/Twitter buralarda sadece "Dork" amaçlı var. 
-    # Yani Google'a "Facebook'taki Telegram linklerini bul" diyoruz.
+    found_urls = set() # Aynı linki tekrar eklememek için
+
+    # Daha geniş sorgular (Facebook/Twitter yerine genel tarama daha verimli olabilir)
     queries = [
-        f'site:t.me joinchat "{keyword}"',
+        f'site:t.me "{keyword}"',
         f'"t.me/+" "{keyword}"',
-        f'site:facebook.com "t.me/joinchat" "{keyword}"',
-        f'site:twitter.com "t.me/+" "{keyword}"',
-        f'site:instagram.com "t.me" "{keyword}"'
+        f'"{keyword}" "t.me/joinchat"',
+        f'"{keyword}" "Telegram grubu"',
+        f'site:facebook.com "{keyword}" "t.me"',
+        f'site:instagram.com "{keyword}" "t.me"',
+        f'site:vk.com "{keyword}" "t.me"'
     ]
     
+    # TELEGRAM LİNKİNİ BULAN SİHİRLİ REGEX
+    # Bu kod, bir metnin içinde "t.me/blabla" gördüğü an yakalar.
+    telegram_regex = re.compile(r'(https?://t\.me/(?:joinchat/|\+)?[\w\d_]+)')
+
     try:
         with DDGS() as ddgs:
             for q in queries:
-                # max_results=20 yaptık ki hızlı olsun, çok bekletmesin
-                results = list(ddgs.text(q, region='tr-tr', safesearch='off', max_results=20))
+                # Sonuçları çekiyoruz
+                results = list(ddgs.text(q, region='tr-tr', safesearch='off', max_results=25))
                 
                 for res in results:
-                    url = res.get('href', '')
-                    title = res.get('title', 'Başlık Yok')
+                    # Linki hem başlıkta, hem linkte, hem de açıklamada arayacağız
+                    search_content = f"{res.get('href', '')} {res.get('title', '')} {res.get('body', '')}"
                     
-                    if "t.me/" in url:
-                        clean = url.split("?")[0].strip()
-                        # Çok uzun linkleri (spam) engellemek için filtre
-                        if clean.count("/") <= 5:
-                            links.append({"url": clean, "title": title})
+                    # Regex ile metnin içindeki TÜM t.me linklerini bul
+                    matches = telegram_regex.findall(search_content)
+                    
+                    for match in matches:
+                        clean_link = match.strip()
+                        
+                        # Temizlik ve Filtreleme
+                        if clean_link not in found_urls:
+                            # Sonunda nokta, virgül varsa temizle
+                            clean_link = clean_link.rstrip(".,)!?")
                             
-        random.shuffle(links)
-        return links
+                            # Hatalı/Gereksiz linkleri ele (Örn: t.me/s/.. kanalların web önizlemesidir)
+                            if "/s/" in clean_link or clean_link.endswith("t.me"):
+                                continue
+
+                            found_urls.add(clean_link)
+                            links.append({"url": clean_link, "title": res.get('title', 'Bulunan Link')})
+                            
+        # Karıştır ki hep aynı sırayla gitmesin
+        list_links = list(links)
+        random.shuffle(list_links)
+        return list_links
         
     except Exception as e:
         logger.error(f"Arama hatası: {e}")
         return []
-
 # ==================== ANA MOTOR (LEECH TASK) ====================
 # Burası senin eski kodda eksik olan kısımdı, baştan yazdım.
 
