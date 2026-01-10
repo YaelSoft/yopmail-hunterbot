@@ -14,18 +14,17 @@ API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# 🔥 TEK GOOGLE API KEY (Sadece bunu kullanacağız)
+# 🔥 TEK GOOGLE API KEY
 GOOG_API_KEY = os.environ.get("GOOG_API_KEY", "")
 GOOG_CX = os.environ.get("GOOG_CX", "")
 
 # 🔥 SAHİP AYARLARI
-# Buraya kendi ID'ni yazmazsan bot sana da "Deneme bitti" der.
 ADMIN_ID = int(os.environ.get("OWNER_ID", "0")) 
 
 # LİMİTLER
-DENEME_HAKKI = 2       # Ücretsiz kullanıcı kaç link alabilir?
-SAYFA_SAYISI = 2       # Her aramada kaç sayfa gezsin? (Kotayı korumak için 2 ideal)
-HEDEF_LINK_LIMITI = 50 # Maksimum link sayısı
+DENEME_HAKKI = 2       
+SAYFA_SAYISI = 4       
+HEDEF_LINK_LIMITI = 50 
 
 # Kanal Linkleri
 KANAL_LINKI = "https://t.me/yaelcode" 
@@ -38,13 +37,13 @@ logger = logging.getLogger("SingleKeyBot")
 # Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Tek Motorlu Sistem Aktif 🟢"
+def home(): return "Bot Aktif 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
 client = TelegramClient("pro_hunter_single", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Veritabanı
+# Veritabanı Dosyaları
 CREDITS_FILE = "credits.json"
 HISTORY_FILE = "sent_links.txt"
 USER_STATES = {}
@@ -53,12 +52,17 @@ CONFIG = {"target_chat_id": None}
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
 def load_credits():
-    if not os.path.exists(CREDITS_FILE): return {}
-    try: with open(CREDITS_FILE, "r") as f: return json.load(f)
-    except: return {}
+    if not os.path.exists(CREDITS_FILE): 
+        return {}
+    try: 
+        with open(CREDITS_FILE, "r") as f: 
+            return json.load(f)
+    except: 
+        return {}
 
 def save_credits(data):
-    with open(CREDITS_FILE, "w") as f: json.dump(data, f)
+    with open(CREDITS_FILE, "w") as f: 
+        json.dump(data, f)
 
 def check_license(user_id):
     if user_id == ADMIN_ID: return True, "admin"
@@ -81,10 +85,15 @@ def consume_credit(user_id):
 
 def load_history():
     if not os.path.exists(HISTORY_FILE): return set()
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f: return set(line.strip() for line in f)
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f: 
+            return set(line.strip() for line in f)
+    except:
+        return set()
 
 def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f: 
+        f.write(f"{link}\n")
 
 def extract_username_from_url(url):
     """Dizin sitelerinden (tgstat vb) kullanıcı adı çeker"""
@@ -107,7 +116,6 @@ def google_search_single(query, page=1):
     found = []
     start_index = ((page - 1) * 10) + 1
     
-    # Tek Anahtar Kullanımı
     if not GOOG_API_KEY:
         logger.error("API KEY EKSİK! Render ayarlarını kontrol et.")
         return []
@@ -143,7 +151,8 @@ def google_search_single(query, page=1):
                 continue
 
             # 3. Yazı içinde t.me var mı?
-            matches = regex.findall(f"{title} {snippet}")
+            text_block = f"{title} {snippet}"
+            matches = regex.findall(text_block)
             for m in matches:
                 found.append(m.rstrip('.,")\''))
                 
