@@ -1,3 +1,4 @@
 flask
 telethon
 requests
+curl_cffi
