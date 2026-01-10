@@ -5,7 +5,6 @@ import re
 import time
 import json
 import requests
-import itertools
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events, Button
@@ -15,26 +14,18 @@ API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# 🔥 ÇOKLU API KEY SİSTEMİ (3 Motorlu)
-# Render'da GOOG_API_KEYS kısmına virgülle ayırarak gir.
-keys_str = os.environ.get("GOOG_API_KEYS", "")
-API_KEYS_LIST = [k.strip() for k in keys_str.split(",") if k.strip()]
-
-# Eğer tek key varsa onu kullan, yoksa hata vermesin diye boş liste
-if not API_KEYS_LIST:
-    single = os.environ.get("GOOG_API_KEY", "")
-    if single: API_KEYS_LIST = [single]
-
-# Anahtarları sırayla döndür
-api_key_cycle = itertools.cycle(API_KEYS_LIST)
-
+# 🔥 TEK GOOGLE API KEY (Sadece bunu kullanacağız)
+GOOG_API_KEY = os.environ.get("GOOG_API_KEY", "")
 GOOG_CX = os.environ.get("GOOG_CX", "")
 
 # 🔥 SAHİP AYARLARI
-ADMIN_ID = int(os.environ.get("OWNER_ID", "0")) # Render'a OWNER_ID ekle veya buraya ID yaz
-DENEME_HAKKI = 3       # Ücretsiz deneme link sayısı
-SAYFA_SAYISI = 4       # Toplam kaç sayfa gezsin? (2 Genel + 2 Dizin)
-HEDEF_LINK_LIMITI = 100 # Maksimum link sayısı
+# Buraya kendi ID'ni yazmazsan bot sana da "Deneme bitti" der.
+ADMIN_ID = int(os.environ.get("OWNER_ID", "0")) 
+
+# LİMİTLER
+DENEME_HAKKI = 2       # Ücretsiz kullanıcı kaç link alabilir?
+SAYFA_SAYISI = 2       # Her aramada kaç sayfa gezsin? (Kotayı korumak için 2 ideal)
+HEDEF_LINK_LIMITI = 50 # Maksimum link sayısı
 
 # Kanal Linkleri
 KANAL_LINKI = "https://t.me/yaelcode" 
@@ -42,16 +33,16 @@ ADMIN_USER = "yasin33"
 
 # Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("HybridHunter")
+logger = logging.getLogger("SingleKeyBot")
 
 # Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Hybrid System Online 🟢"
+def home(): return "Tek Motorlu Sistem Aktif 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-client = TelegramClient("pro_hunter", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+client = TelegramClient("pro_hunter_single", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # Veritabanı
 CREDITS_FILE = "credits.json"
@@ -106,29 +97,30 @@ def extract_username_from_url(url):
         username = parts.split("-", 1)[1] if "-" in parts else parts
     
     username = username.split("?")[0].strip()
-    # Geçerli bir username mi?
     if re.match(r'^[a-zA-Z0-9_]{4,}$', username):
         return f"https://t.me/{username}"
     return None
 
-# ==================== HİBRİT ARAMA MOTORU ====================
+# ==================== GOOGLE ARAMA MOTORU ====================
 
-def google_search_hybrid(query, page=1):
+def google_search_single(query, page=1):
     found = []
     start_index = ((page - 1) * 10) + 1
     
-    if not API_KEYS_LIST: return []
-    current_key = next(api_key_cycle) # Anahtarı değiştir
-    
+    # Tek Anahtar Kullanımı
+    if not GOOG_API_KEY:
+        logger.error("API KEY EKSİK! Render ayarlarını kontrol et.")
+        return []
+
     url = "https://www.googleapis.com/customsearch/v1"
-    params = {'key': current_key, 'cx': GOOG_CX, 'q': query, 'start': start_index, 'num': 10}
+    params = {'key': GOOG_API_KEY, 'cx': GOOG_CX, 'q': query, 'start': start_index, 'num': 10}
     
     try:
         resp = requests.get(url, params=params)
         data = resp.json()
         
         if "error" in data:
-            logger.error(f"API Hatası: {data['error']['message']}")
+            logger.error(f"Google API Hatası: {data['error']['message']}")
             return []
         if "items" not in data: return []
         
@@ -139,18 +131,18 @@ def google_search_hybrid(query, page=1):
             snippet = item.get('snippet', '')
             title = item.get('title', '')
             
-            # 1. YÖNTEM: Direkt t.me linki mi?
+            # 1. Direkt t.me linki
             if "t.me/" in link:
                 found.append(link.split("?")[0])
                 continue
 
-            # 2. YÖNTEM: Dizin sitesi mi? (tgstat vb.) -> Dönüştür
+            # 2. Dizin sitesi linki -> Çevir
             converted = extract_username_from_url(link)
             if converted and "t.me/" in converted:
                 found.append(converted)
                 continue
 
-            # 3. YÖNTEM: Yazının içinde t.me geçiyor mu?
+            # 3. Yazı içinde t.me var mı?
             matches = regex.findall(f"{title} {snippet}")
             for m in matches:
                 found.append(m.rstrip('.,")\''))
@@ -160,7 +152,7 @@ def google_search_hybrid(query, page=1):
         
     return list(set(found))
 
-# ==================== MENÜ SİSTEMİ ====================
+# ==================== MENÜLER ====================
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
@@ -171,14 +163,14 @@ async def start_handler(event):
     
     text = (
         f"👋 **Selam {user.first_name}!**\n"
-        f"🤖 **Hibrit Link Avcısı** (Google + Dizinler)\n\n"
+        f"🤖 **Profesyonel Link Avcısı**\n\n"
         f"{status_msg}\n"
         f"🎯 **Hedef:** {CONFIG.get('target_chat_id', 'Ayarlanmadı')}\n\n"
-        "Ne yapmak istersin?"
+        "Aşağıdan işlem seçebilirsin:"
     )
     
     buttons = [
-        [Button.inline("🔍 Kelime Tara", b"search_hybrid")],
+        [Button.inline("🔍 Link Bul (Kelime)", b"search_hybrid")],
         [Button.inline("⚙️ Hedef Seç (Admin)", b"set_target")],
         [Button.url("📣 Kanalımız", KANAL_LINKI), Button.url("👨‍💻 Admin / Satın Al", f"https://t.me/{ADMIN_USER}")]
     ]
@@ -205,13 +197,13 @@ async def callback_handler(event):
     elif data.startswith("target_"):
         chat_id = int(data.split("_")[1])
         CONFIG["target_chat_id"] = chat_id
-        await event.edit(f"✅ Hedef: `{chat_id}`", buttons=[[Button.inline("🔙 Menü", b"main_menu")]])
+        await event.edit(f"✅ Hedef: `{chat_id}` olarak ayarlandı.", buttons=[[Button.inline("🔙 Menü", b"main_menu")]])
 
     elif data == "search_hybrid":
         if not is_allowed: return await event.answer("Limit Doldu! Admine Yazın.", alert=True)
-        if not CONFIG["target_chat_id"]: return await event.answer("Hedef Seçilmedi!", alert=True)
+        if not CONFIG["target_chat_id"]: return await event.answer("Önce Hedef Seçilmeli!", alert=True)
         USER_STATES[user_id] = "HYBRID"
-        await event.edit("🔍 **Aranacak kelimeyi yazın:**\n\nÖrn: `Yazılım`, `Borsa`, `Sohbet`\nBot hem Google'ı hem Telegram sitelerini tarayacaktır.", buttons=None)
+        await event.edit("🔍 **Aranacak kelimeyi yazın:**\n\nÖrn: `Yazılım`, `Borsa`, `Sohbet`", buttons=None)
 
     elif data == "main_menu":
         await start_handler(event)
@@ -227,27 +219,23 @@ async def input_handler(event):
     is_allowed, info = check_license(user_id)
     if not is_allowed: return await event.respond("⛔ **Limit Doldu!**\nDevamı için: @yasin33")
 
-    msg = await event.respond("🚀 **Hibrit Motorlar Çalıştırılıyor...**")
+    msg = await event.respond("🚀 **Arama Başlatılıyor...**")
     
-    # --- STRATEJİ: 2 AŞAMALI ARAMA ---
-    # 1. Aşama: Direkt Google'daki t.me linkleri (Senin sevdiğin yöntem)
-    query_general = f'site:t.me "{text}" (chat OR group OR sohbet)'
-    
-    # 2. Aşama: Dizin sitelerindeki linkler (Tgstat vb.)
-    dizinler = "site:tgstat.com OR site:telemetr.io OR site:hottg.com OR site:telegramindex.com"
-    query_directories = f'({dizinler}) "{text}"'
-
-    queries = [query_general, query_directories] # Sırayla bunları yapacak
+    # Hibrit Sorgular (Google + Dizinler)
+    queries = [
+        f'site:t.me "{text}" (chat OR group OR sohbet)', # 1. Genel
+        f'(site:tgstat.com OR site:telemetr.io OR site:hottg.com) "{text}"' # 2. Dizin
+    ]
     
     history = load_history()
     toplanan = 0
     
-    # Her sorgu türü için (Önce Genel, Sonra Dizin)
+    # Her sorgu türü için
     for q_type in queries:
         if toplanan >= HEDEF_LINK_LIMITI: break
         
         # Sayfaları gez
-        for page in range(1, 3): # Her sorgu türü için 2 sayfa gez (Toplam 4-5 sayfa eder)
+        for page in range(1, SAYFA_SAYISI + 1):
             if toplanan >= HEDEF_LINK_LIMITI: break
             
             can_continue, _ = check_license(user_id)
@@ -255,20 +243,15 @@ async def input_handler(event):
                 await client.send_message(user_id, "⛔ Deneme hakkınız bitti.")
                 return
 
-            try: await msg.edit(f"🔎 **Taranıyor...**\nMod: {'Genel' if 'site:t.me' in q_type else 'Dizin'}\nBulunan: {toplanan}")
+            try: await msg.edit(f"🔎 **Taranıyor...**\nSayfa: {page}\nBulunan: {toplanan}")
             except: pass
             
-            links = google_search_hybrid(q_type, page)
+            links = google_search_single(q_type, page)
             
             for link in links:
                 can_send, _ = check_license(user_id)
                 if not can_send: break
 
-                # Yasaklı kelime / Temizlik
-                ignore = ["share", "socks", "proxy", "google", "telegram", "status", "joinchat"] 
-                # joinchat'i eleme, o lazım olabilir ama bazen bozuk oluyor.
-                # Şimdilik temiz kalsın.
-                
                 if link not in history:
                     try:
                         await client.send_message(CONFIG["target_chat_id"], link, link_preview=False)
@@ -276,7 +259,7 @@ async def input_handler(event):
                         save_history(link)
                         consume_credit(user_id)
                         toplanan += 1
-                        await asyncio.sleep(2.5) # Güvenli bekleme
+                        await asyncio.sleep(2.5) # Spam yememek için
                     except Exception as e: logger.error(f"Hata: {e}")
             
             await asyncio.sleep(1)
