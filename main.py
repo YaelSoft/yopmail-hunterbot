@@ -19,27 +19,26 @@ GOOG_API_KEY = os.environ.get("GOOG_API_KEY", "")
 GOOG_CX = os.environ.get("GOOG_CX", "")
 
 # 🔥 SAHİP AYARLARI (Otomatik Algılama)
-# Render'a ADMIN_ID veya OWNER_ID olarak girdiysen ikisini de dener.
 env_admin = os.environ.get("ADMIN_ID", os.environ.get("OWNER_ID", "0"))
 ADMIN_ID = int(env_admin)
 
 # LİMİTLER
-DENEME_HAKKI = 2       
-SAYFA_SAYISI = 3       
+DENEME_HAKKI = 3       
+SAYFA_SAYISI = 2       
 HEDEF_LINK_LIMITI = 50 
 
 # Kanal Linkleri
-KANAL_LINKI = "https://t.me/yaelcodetr" 
+KANAL_LINKI = "https://t.me/yaelcode" 
 ADMIN_USER = "yasin33" 
 
 # Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("ProBotV2")
+logger = logging.getLogger("ProBotV2_Fix")
 
 # Web Server
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot V2 Aktif 🟢"
+def home(): return "Bot Fixlendi 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
@@ -48,31 +47,40 @@ client = TelegramClient("pro_hunter_v2", API_ID, API_HASH).start(bot_token=BOT_T
 # Veritabanı Dosyaları
 CREDITS_FILE = "credits.json"
 HISTORY_FILE = "sent_links.txt"
-CONFIG_FILE = "config.json" # Hedef ayarları burada tutulacak
+CONFIG_FILE = "config.json" 
 
 USER_STATES = {}
 
 # ==================== VERİTABANI YÖNETİMİ ====================
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE): return {"target_chat_id": None}
-    try: 
-        with open(CONFIG_FILE, "r") as f: return json.load(f)
-    except: return {"target_chat_id": None}
+    if not os.path.exists(CONFIG_FILE): 
+        return {"target_chat_id": None}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"target_chat_id": None}
 
 def save_config(data):
-    with open(CONFIG_FILE, "w") as f: json.dump(data, f)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f)
 
 # Global Config'i Yükle
 BOT_CONFIG = load_config()
 
 def load_credits():
-    if not os.path.exists(CREDITS_FILE): return {}
-    try: with open(CREDITS_FILE, "r") as f: return json.load(f)
-    except: return {}
+    if not os.path.exists(CREDITS_FILE): 
+        return {}
+    try:
+        with open(CREDITS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
 def save_credits(data):
-    with open(CREDITS_FILE, "w") as f: json.dump(data, f)
+    with open(CREDITS_FILE, "w") as f:
+        json.dump(data, f)
 
 def check_license(user_id):
     if user_id == ADMIN_ID: return True, "admin"
@@ -96,12 +104,14 @@ def consume_credit(user_id):
 def load_history():
     if not os.path.exists(HISTORY_FILE): return set()
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f: 
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             return set(line.strip() for line in f)
-    except: return set()
+    except:
+        return set()
 
 def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{link}\n")
 
 def extract_username_from_url(url):
     """Dizin sitelerinden kullanıcı adı çeker"""
@@ -247,15 +257,12 @@ async def input_handler(event):
     
     # SORGULARI AYARLA
     if state == "KEYWORD":
-        # Hibrit Arama (Hem direkt t.me hem dizinler)
-        # Örn: site:t.me "yazılım" chat
+        # Hibrit Arama
         query = f'site:t.me "{text}" (chat OR group OR sohbet)'
         log_txt = f"Kelime: {text}"
         
     elif state == "SITE":
         # Site İçi Arama
-        # Örn: site:tgstat.com "t.me"
-        # Domain temizliği (https:// at)
         domain = text.replace("https://", "").replace("http://", "").split("/")[0]
         query = f'site:{domain} "t.me"'
         log_txt = f"Site: {domain}"
@@ -278,6 +285,10 @@ async def input_handler(event):
         
         links = google_search(query, page)
         
+        if not links:
+            # Boş sayfada bekleme yapma
+            pass
+
         for link in links:
             can_send, _ = check_license(user_id)
             if not can_send: break
