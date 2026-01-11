@@ -23,12 +23,12 @@ env_admin = os.environ.get("ADMIN_ID", os.environ.get("OWNER_ID", "0"))
 ADMIN_ID = int(env_admin)
 
 # LİMİTLER
-DENEME_HAKKI = 3       
+DENEME_HAKKI = 2       
 SAYFA_SAYISI = 2       
 HEDEF_LINK_LIMITI = 50 
 
 # Kanal Linkleri
-KANAL_LINKI = "https://t.me/yaelcode" 
+KANAL_LINKI = "https://t.me/yaelcodetr" 
 ADMIN_USER = "yasin33" 
 
 # Loglama
