@@ -53,7 +53,7 @@ def home(): return f"{BOT_NAME} Online 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-client = TelegramClient("pro_hunter_v14", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+client = TelegramClient("pro_hunter_v14_fix", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 # Dosyalar
 CREDITS_FILE = "credits.json"
@@ -61,25 +61,41 @@ HISTORY_FILE = "sent_links.txt"
 CONFIG_FILE = "config.json" 
 USER_STATES = {}
 
-# ==================== YARDIMCI FONKSİYONLAR ====================
+# ==================== YARDIMCI FONKSİYONLAR (GARANTİLİ YAZIM) ====================
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE): return {"target_chat_id": None, "target_topic_id": None}
-    try: with open(CONFIG_FILE, "r") as f: return json.load(f)
-    except: return {"target_chat_id": None, "target_topic_id": None}
+    if not os.path.exists(CONFIG_FILE):
+        return {"target_chat_id": None, "target_topic_id": None}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"target_chat_id": None, "target_topic_id": None}
 
 def save_config(data):
-    with open(CONFIG_FILE, "w") as f: json.dump(data, f)
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Config Kayıt Hatası: {e}")
 
 BOT_CONFIG = load_config()
 
 def load_credits():
-    if not os.path.exists(CREDITS_FILE): return {}
-    try: with open(CREDITS_FILE, "r") as f: return json.load(f)
-    except: return {}
+    if not os.path.exists(CREDITS_FILE):
+        return {}
+    try:
+        with open(CREDITS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
 def save_credits(data):
-    with open(CREDITS_FILE, "w") as f: json.dump(data, f)
+    try:
+        with open(CREDITS_FILE, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
 
 def check_license(user_id):
     if user_id == ADMIN_ID: return True, "admin"
@@ -102,11 +118,18 @@ def consume_credit(user_id):
 
 def load_history():
     if not os.path.exists(HISTORY_FILE): return set()
-    try: with open(HISTORY_FILE, "r", encoding="utf-8") as f: return set(line.strip() for line in f)
-    except: return set()
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f)
+    except:
+        return set()
 
 def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
+    try:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{link}\n")
+    except:
+        pass
 
 async def resolve_target_link(link):
     link = link.strip().replace("https://", "").replace("t.me/", "")
@@ -127,29 +150,17 @@ async def resolve_target_link(link):
         return chat_id, topic_id
     except: return None, None
 
-# ==================== 🔥 SIFIR FİLTRE (SÜPÜRGE) ====================
+# ==================== SIFIR FİLTRE (SÜPÜRGE) ====================
 
 def clean_and_format_link(link):
-    """
-    Doğrulama YAPMAZ. Sadece linki güzelleştirir.
-    Telegram API'sine sormaz, bu yüzden çok hızlıdır ve hata vermez.
-    """
     try:
-        # Linki temizle
         link = link.strip().split("?")[0].rstrip(".,'\"")
-        
-        # Eğer başında https yoksa ekle
         if not link.startswith("http"):
-            # Eğer başında t.me yoksa (sadece username ise) ekle
-            if "t.me" not in link:
-                link = f"https://t.me/{link}"
-            else:
-                link = f"https://{link}"
+            if "t.me" not in link: link = f"https://t.me/{link}"
+            else: link = f"https://{link}"
         
-        # Basit Regex Kontrolü: Gerçekten Telegram formatına benziyor mu?
         if "t.me/" in link and len(link) > 10:
             return link
-            
     except: pass
     return None
 
@@ -162,15 +173,11 @@ def scrape_site_content(url):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         response = cureq.get(url, headers=headers, impersonate="chrome124", timeout=20)
         
-        # Çok geniş regex (Her şeyi yakalar)
         regex = re.compile(r'(?:https?://)?(?:www\.)?t\.me/[\w\d_+\-]+')
-        
-        # 1. Düz Metin Tarama
         for m in regex.findall(response.text):
             formatted = clean_and_format_link(m)
             if formatted: found.add(formatted)
 
-        # 2. HTML href Tarama
         soup = BeautifulSoup(response.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             href = a['href']
@@ -187,7 +194,6 @@ async def scrape_from_telegram_group(source_link, limit=1000):
     logger.info(f"♻️ Gruba Bakılıyor: {source_link}")
     try:
         entity = await client.get_entity(source_link)
-        # Filtre YOK, tüm mesajlara bak (URL Filter bazen kaçırır)
         async for message in client.iter_messages(entity, limit=limit):
             if message.text:
                 regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
@@ -195,7 +201,6 @@ async def scrape_from_telegram_group(source_link, limit=1000):
                     formatted = clean_and_format_link(m)
                     if formatted: found_links.add(formatted)
             
-            # Butonlar
             if message.reply_markup and hasattr(message.reply_markup, 'rows'):
                 for row in message.reply_markup.rows:
                     for btn in row.buttons:
@@ -218,9 +223,7 @@ def google_search(query, page=1):
         data = resp.json()
         if "items" not in data: return []
         
-        # Geniş Regex
         regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
-        
         for item in data['items']:
             text = f"{item.get('link')} {item.get('snippet')} {item.get('title')}"
             for m in regex.findall(text): 
@@ -244,6 +247,7 @@ async def start_handler(event):
 
         text = (
             f"👋 **{BOT_NAME}**\n"
+            f"🚀 **Mod:** No-Filter (Süpürge)\n\n"
             f"{status}\n"
             f"🎯 **Hedef:** {target_info}\n\n"
             "👇 **İşlem Seç:**"
@@ -330,7 +334,7 @@ async def input_handler(event):
     is_allowed, info = check_license(user_id)
     if not is_allowed: return await event.respond("⛔ **Limit Doldu!**", buttons=[[Button.inline("🔙", b"main_menu")]])
 
-    msg = await event.respond("🚀 **Süpürge Çalıştırılıyor...**")
+    msg = await event.respond("🚀 **İşlem Başlatılıyor...**")
     raw_links = []
     
     if state == "KEYWORD":
@@ -368,7 +372,7 @@ async def input_handler(event):
         return
 
     unique_links = list(set(raw_links))
-    await msg.edit(f"🧐 **{len(unique_links)} Link Bulundu.**\nAyıklanmadan gönderiliyor...")
+    await msg.edit(f"🧐 **{len(unique_links)} Link Bulundu.**\nSüpürge modu aktif...")
 
     for link in unique_links:
         if toplanan >= HEDEF_LINK_LIMITI: break
@@ -376,14 +380,13 @@ async def input_handler(event):
         if not can_continue: break
 
         if link not in history:
-            # DOĞRULAMA YOK! NE BULURSAK ATIYORUZ.
             try:
                 await client.send_message(target_id, link, reply_to=target_topic, link_preview=False)
                 history.add(link)
                 save_history(link)
                 consume_credit(user_id)
                 toplanan += 1
-                await asyncio.sleep(2) # Flood yememek için mecburi bekleme
+                await asyncio.sleep(2)
             except Exception as e: logger.error(f"Hata: {e}")
     
     await msg.edit(f"🏁 **Tamamlandı!**\n**{toplanan}** adet link atıldı.", buttons=[[Button.inline("🔙 Menü", b"main_menu")]])
