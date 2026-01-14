@@ -19,7 +19,7 @@ from duckduckgo_search import DDGS
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SESSION_STRING = os.environ.get("SESSION_STRING", "") # Opsiyonel Userbot
+SESSION_STRING = os.environ.get("SESSION_STRING", "") # Opsiyonel
 
 # GOOGLE API
 GOOG_API_KEY = os.environ.get("GOOG_API_KEY", "")
@@ -36,13 +36,13 @@ HEDEF_LINK_LIMITI = 200
 GRUP_TARAMA_LIMITI = 1000 
 
 # Markalama
-BOT_NAME = "Yael Tg Grup Bulma Botu"
+BOT_NAME = "Yael Grup Bulma Botu"
 KANAL_LINKI = "https://t.me/yaelcodetr" 
 ADMIN_USER = "yasin33" 
 
 # Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, stream=sys.stdout)
-logger = logging.getLogger("LinkRadar_V21")
+logger = logging.getLogger("LinkRadar")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Web Server
@@ -52,44 +52,54 @@ def home(): return f"{BOT_NAME} Online 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-# 1. NORMAL BOT (Arayüz ve Gönderim İçin)
+# 1. NORMAL BOT
 bot = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# 2. USERBOT (Tarama İçin - Varsa)
+# 2. USERBOT (Varsa)
 userbot = None
 if SESSION_STRING:
     try:
         userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-        logger.info("✅ Userbot Aktif: Grup tarama tam güç çalışacak.")
+        logger.info("✅ Userbot Aktif")
     except Exception as e:
-        logger.warning(f"⚠️ Userbot Başlatılamadı: {e}")
+        logger.warning(f"⚠️ Userbot Hatası: {e}")
 
 # Veritabanı
 CREDITS_FILE = "credits.json"
 HISTORY_FILE = "sent_links.txt"
 CONFIG_FILE = "config.json" 
 USER_STATES = {}
-RUNTIME_HISTORY = set() # Anlık hafıza
+RUNTIME_HISTORY = set()
 
-# ==================== YARDIMCI FONKSİYONLAR ====================
+# ==================== VERİTABANI YÖNETİMİ (DÜZELTİLDİ) ====================
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE): return {"target_chat_id": None, "target_topic_id": None}
-    try: with open(CONFIG_FILE, "r") as f: return json.load(f)
-    except: return {"target_chat_id": None, "target_topic_id": None}
+    if not os.path.exists(CONFIG_FILE):
+        return {"target_chat_id": None, "target_topic_id": None}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"target_chat_id": None, "target_topic_id": None}
 
 def save_config(data):
-    with open(CONFIG_FILE, "w") as f: json.dump(data, f)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f)
 
 BOT_CONFIG = load_config()
 
 def load_credits():
-    if not os.path.exists(CREDITS_FILE): return {}
-    try: with open(CREDITS_FILE, "r") as f: return json.load(f)
-    except: return {}
+    if not os.path.exists(CREDITS_FILE):
+        return {}
+    try:
+        with open(CREDITS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
 def save_credits(data):
-    with open(CREDITS_FILE, "w") as f: json.dump(data, f)
+    with open(CREDITS_FILE, "w") as f:
+        json.dump(data, f)
 
 def check_license(user_id):
     if user_id == ADMIN_ID: return True, "admin"
@@ -112,18 +122,21 @@ def consume_credit(user_id):
 
 def load_history():
     if not os.path.exists(HISTORY_FILE): return set()
-    try: with open(HISTORY_FILE, "r", encoding="utf-8") as f: return set(line.strip() for line in f)
-    except: return set()
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f)
+    except:
+        return set()
 
 def save_history(link):
-    with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{link}\n")
 
 # HAFIZA SENKRONİZASYONU
 async def sync_history_from_group():
     target = BOT_CONFIG.get("target_chat_id")
     if not target: return
     try:
-        # Bot kendi attığı mesajları okur
         async for message in bot.iter_messages(target, limit=1000):
             if message.text:
                 regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
@@ -142,7 +155,6 @@ async def resolve_target_link(link):
             parts = link.split("/")
             username = parts[0]
             try:
-                # Botun gördüğü entity'i al
                 entity = await bot.get_entity(username)
                 chat_id = int(f"-100{entity.id}") if not str(entity.id).startswith("-100") else entity.id
             except: return None, None
@@ -162,81 +174,62 @@ def clean_and_format_link(link):
     except: pass
     return None
 
-# ==================== 🔥 GRUP TARAMA (FİXLENDİ) ====================
+# ==================== GRUP VE SİTE TARAYICILAR ====================
 
 async def scrape_from_telegram_group(source_link, limit=500):
     found_links = set()
     
-    # Hangi client'ı kullanacağız?
-    # Userbot varsa onu kullan (Her yere girer)
-    # Yoksa Bot'u kullan (Sadece olduğu grupları görür)
+    # Userbot varsa onu kullan, yoksa Bot
     if userbot and userbot.is_connected():
         client_to_use = userbot
-        worker_name = "Userbot"
+        worker = "Userbot"
     else:
         client_to_use = bot
-        worker_name = "Bot"
+        worker = "Bot"
 
-    logger.info(f"♻️ Grup Taranıyor ({worker_name}): {source_link}")
+    logger.info(f"♻️ Grup Taranıyor ({worker}): {source_link}")
     
     try:
-        # Önce linki çözümle (Invite link mi yoksa public mi?)
+        # Link Çözümleme
         if "joinchat" in source_link or "+" in source_link:
-            try:
-                # Private link ise katılmaya çalış (Sadece Userbot yapabilir)
-                if worker_name == "Userbot":
-                    entity = await client_to_use.join_chat(source_link)
-                else:
-                    logger.error("❌ Bot özel linklere katılamaz. Userbot (Session) ekleyin.")
-                    return []
-            except Exception as e:
-                logger.error(f"Gruba girilemedi: {e}")
+            if worker == "Userbot":
+                try: entity = await client_to_use.join_chat(source_link)
+                except: return []
+            else:
+                logger.error("Bot özel linklere giremez.")
                 return []
         else:
-            try:
-                entity = await client_to_use.get_entity(source_link)
-            except Exception as e:
-                logger.error(f"Grup bulunamadı ({worker_name}): {e}")
-                return []
+            try: entity = await client_to_use.get_entity(source_link)
+            except: return []
 
-        # Mesajları Tara
+        # Tarama
         async for message in client_to_use.iter_messages(entity, limit=limit):
-            # Metin içindeki linkler
             if message.text:
                 regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
                 for m in regex.findall(message.text):
                     formatted = clean_and_format_link(m)
                     if formatted: found_links.add(formatted)
             
-            # Butonlardaki linkler
             if message.reply_markup and hasattr(message.reply_markup, 'rows'):
                 for row in message.reply_markup.rows:
                     for btn in row.buttons:
                         if hasattr(btn, 'url') and btn.url and "t.me" in btn.url:
                             found_links.add(clean_and_format_link(btn.url))
             
-            # Entities (Metne gömülü linkler)
             if message.entities:
                 for ent in message.entities:
                     if hasattr(ent, 'url') and ent.url and "t.me" in ent.url:
                         found_links.add(clean_and_format_link(ent.url))
 
-    except Exception as e:
-        logger.error(f"Grup Tarama Hatası: {e}")
-        
-    logger.info(f"✅ {worker_name} {len(found_links)} link buldu.")
+    except Exception as e: logger.error(f"Grup Hata: {e}")
     return list(found_links)
-
-# ==================== DİĞER TARAYICILAR ====================
 
 def fetch_combot_api(url):
     found = []
-    logger.info("🔓 Combot API...")
     lang = "tr"
     if "lng=" in url:
         try: lang = url.split("lng=")[1].split("&")[0]
         except: pass
-    
     api_url = f"https://combot.org/api/chart/all?limit=100&offset=0&lang={lang}"
     try:
         resp = requests.get(api_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
@@ -303,16 +296,14 @@ async def start_handler(event):
         status = "👑 **Yönetici**" if info == "admin" else f"⏳ **Hak:** {DENEME_HAKKI - info}"
         tid = BOT_CONFIG.get("target_chat_id")
         t_info = f"✅ `{tid}`" if tid else "❌ **AYARSIZ**"
-        
-        # Userbot Bilgisi
-        ub_txt = "✅ Userbot Aktif" if userbot and userbot.is_connected() else "⚠️ Userbot Yok (Kısıtlı)"
+        ub_txt = "✅ Aktif" if userbot and userbot.is_connected() else "⚠️ Pasif"
 
         text = (
             f"👋 **{BOT_NAME}**\n\n"
             f"{status}\n"
             f"🎯 **Hedef:** {t_info}\n"
-            f"🤖 **Mod:** {ub_txt}\n\n"
-            "👇 **Ne Lazım?**"
+            f"🤖 **Userbot:** {ub_txt}\n\n"
+            "👇 **İşlem Seç:**"
         )
         
         buttons = [
@@ -339,7 +330,7 @@ async def callback_handler(event):
     
     if data == "set_target_help":
         if user_id != ADMIN_ID: return await event.answer("Admin Only!", alert=True)
-        await event.edit("⚙️ **Kurulum:**\nHedef topic'e gir, **/kur** yaz.", buttons=[[Button.inline("🔙", b"main_menu")]])
+        await event.edit("⚙️ **Kurulum:**\nGruba gir, **/kur** yaz.", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "search_keyword":
         is_allowed, info = check_license(user_id)
@@ -353,15 +344,13 @@ async def callback_handler(event):
         if not is_allowed: return await event.answer("Limit Bitti!", alert=True)
         if not BOT_CONFIG.get("target_chat_id"): return await event.answer("Hedef Yok!", alert=True)
         USER_STATES[user_id] = "SITE"
-        await event.edit("🌐 **Hangi Site?**\n(Örn: combot.org)", buttons=[[Button.inline("🔙", b"main_menu")]])
+        await event.edit("🌐 **Site Linki?**\n(Örn: combot.org)", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "scrape_group":
         is_allowed, info = check_license(user_id)
         if not is_allowed: return await event.answer("Limit Bitti!", alert=True)
         if not BOT_CONFIG.get("target_chat_id"): return await event.answer("Hedef Yok!", alert=True)
         USER_STATES[user_id] = "GROUP_SCRAPE"
-        
-        # Uyarı metni
         warning = "\n⚠️ **Uyarı:** Userbot yoksa sadece botun olduğu gruplar çalışır." if not userbot else ""
         await event.edit(f"♻️ **Kaynak Grup Linki?**{warning}", buttons=[[Button.inline("🔙", b"main_menu")]])
 
@@ -379,7 +368,7 @@ async def input_handler(event):
     del USER_STATES[user_id]
     
     is_allowed, info = check_license(user_id)
-    if not is_allowed: return await event.respond("⛔ **Bitti.**")
+    if not is_allowed: return await event.respond("⛔ **Bitti.**", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     msg = await event.respond("🚀 **Başlıyoruz...**")
     raw_links = []
@@ -414,7 +403,7 @@ async def input_handler(event):
     target_id = BOT_CONFIG.get("target_chat_id")
     target_topic = BOT_CONFIG.get("target_topic_id")
     
-    unique_links = list(set([l for l in raw_links if l])) # Temizle
+    unique_links = list(set([l for l in raw_links if l]))
     
     if not unique_links:
         await msg.edit("❌ **Sonuç Yok.**", buttons=[[Button.inline("🔙", b"main_menu")]])
@@ -427,7 +416,6 @@ async def input_handler(event):
         can_continue, _ = check_license(user_id)
         if not can_continue: break
 
-        # Hafıza Kontrolü
         if link not in history and link not in RUNTIME_HISTORY:
             try:
                 await bot.send_message(target_id, link, reply_to=target_topic, link_preview=False)
