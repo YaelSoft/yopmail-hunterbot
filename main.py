@@ -9,17 +9,19 @@ import urllib3
 from threading import Thread
 from flask import Flask
 from telethon import TelegramClient, events, Button
-from telethon.tl.types import Channel, Chat, User
+from telethon.sessions import StringSession
+from telethon.tl.types import Channel, Chat, User, InputMessagesFilterUrl
 from curl_cffi import requests as cureq
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS # 🔥 YENİ MOTOR
+from duckduckgo_search import DDGS
 
 # ==================== AYARLAR ====================
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+SESSION_STRING = os.environ.get("SESSION_STRING", "") # Opsiyonel Userbot
 
-# GOOGLE API (Yedek Güç)
+# GOOGLE API
 GOOG_API_KEY = os.environ.get("GOOG_API_KEY", "")
 GOOG_CX = os.environ.get("GOOG_CX", "")
 
@@ -29,18 +31,18 @@ ADMIN_ID = int(env_admin)
 
 # LİMİTLER
 DENEME_HAKKI = 3       
-SAYFA_SAYISI = 100     # Önemli değil, DuckDuckGo limitsiz basar
-HEDEF_LINK_LIMITI = 200 # Limiti artırdık
+SAYFA_SAYISI = 7       
+HEDEF_LINK_LIMITI = 200 
 GRUP_TARAMA_LIMITI = 1000 
 
 # Markalama
-BOT_NAME = "Yael Tg Link Search"
+BOT_NAME = "Yael Tg Grup Bulma Botu"
 KANAL_LINKI = "https://t.me/yaelcodetr" 
 ADMIN_USER = "yasin33" 
 
 # Loglama
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, stream=sys.stdout)
-logger = logging.getLogger("Yael Tg Link Search")
+logger = logging.getLogger("LinkRadar_V21")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Web Server
@@ -50,13 +52,24 @@ def home(): return f"{BOT_NAME} Online 🟢"
 def run_web(): port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port)
 def keep_alive(): t = Thread(target=run_web); t.daemon = True; t.start()
 
-client = TelegramClient("pro_hunter_v15", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# 1. NORMAL BOT (Arayüz ve Gönderim İçin)
+bot = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Dosyalar
+# 2. USERBOT (Tarama İçin - Varsa)
+userbot = None
+if SESSION_STRING:
+    try:
+        userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+        logger.info("✅ Userbot Aktif: Grup tarama tam güç çalışacak.")
+    except Exception as e:
+        logger.warning(f"⚠️ Userbot Başlatılamadı: {e}")
+
+# Veritabanı
 CREDITS_FILE = "credits.json"
 HISTORY_FILE = "sent_links.txt"
 CONFIG_FILE = "config.json" 
 USER_STATES = {}
+RUNTIME_HISTORY = set() # Anlık hafıza
 
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
@@ -105,6 +118,18 @@ def load_history():
 def save_history(link):
     with open(HISTORY_FILE, "a", encoding="utf-8") as f: f.write(f"{link}\n")
 
+# HAFIZA SENKRONİZASYONU
+async def sync_history_from_group():
+    target = BOT_CONFIG.get("target_chat_id")
+    if not target: return
+    try:
+        # Bot kendi attığı mesajları okur
+        async for message in bot.iter_messages(target, limit=1000):
+            if message.text:
+                regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
+                for m in regex.findall(message.text): RUNTIME_HISTORY.add(m)
+    except: pass
+
 async def resolve_target_link(link):
     link = link.strip().replace("https://", "").replace("t.me/", "")
     chat_id = None; topic_id = None
@@ -117,7 +142,8 @@ async def resolve_target_link(link):
             parts = link.split("/")
             username = parts[0]
             try:
-                entity = await client.get_entity(username)
+                # Botun gördüğü entity'i al
+                entity = await bot.get_entity(username)
                 chat_id = int(f"-100{entity.id}") if not str(entity.id).startswith("-100") else entity.id
             except: return None, None
             if len(parts) > 1 and parts[1].isdigit(): topic_id = int(parts[1])
@@ -125,213 +151,224 @@ async def resolve_target_link(link):
     except: return None, None
 
 def clean_and_format_link(link):
-    """Süpürge Modu: Ne gelirse formatla ve gönder."""
     try:
         link = link.strip().split("?")[0].rstrip(".,'\"")
-        # Gereksizleri at
         ignore = ["setlanguage", "iv?", "share/url", "socks", "proxy", "contact"]
         if any(x in link for x in ignore): return None
-        
         if not link.startswith("http"):
             if "t.me" not in link: link = f"https://t.me/{link}"
             else: link = f"https://{link}"
-        
-        if "t.me/" in link and len(link) > 10:
-            return link
+        if "t.me/" in link and len(link) > 10: return link
     except: pass
     return None
 
-# ==================== 🔥 ÇİFT TURBO MOTOR (DUCK + GOOGLE) ====================
-
-def duckduckgo_search(query):
-    """DuckDuckGo ile Global ve Sansürsüz Arama"""
-    found = []
-    logger.info(f"🦆 DuckDuckGo Aranıyor: {query}")
-    try:
-        with DDGS() as ddgs:
-            # wt-wt = Global Bölge, safesearch=off = Filtresiz
-            results = ddgs.text(query, region='wt-wt', safesearch='off', max_results=50)
-            
-            for r in results:
-                # Linkin kendisinde t.me var mı?
-                if "t.me/" in r['href']:
-                    formatted = clean_and_format_link(r['href'])
-                    if formatted: found.append(formatted)
-                
-                # Açıklamada t.me var mı? (Regex ile sök)
-                body_text = f"{r['title']} {r['body']}"
-                regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
-                for m in regex.findall(body_text):
-                    formatted = clean_and_format_link(m)
-                    if formatted: found.append(formatted)
-                    
-    except Exception as e:
-        logger.error(f"DuckDuckGo Hatası: {e}")
-        
-    return list(set(found))
-
-def google_search(query):
-    """Google API (Varsa kullanır)"""
-    found = []
-    if not GOOG_API_KEY: return []
-    try:
-        url = "https://www.googleapis.com/customsearch/v1"
-        # num=10 (maksimum), start=1 (ilk sayfa)
-        # Google pahalı olduğu için sadece ilk 2 sayfayı tarıyoruz
-        for page in range(0, 20, 10): 
-            params = {'key': GOOG_API_KEY, 'cx': GOOG_CX, 'q': query, 'start': page+1, 'num': 10}
-            resp = requests.get(url, params=params)
-            data = resp.json()
-            if "items" not in data: break
-            
-            regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
-            for item in data['items']:
-                text = f"{item.get('link')} {item.get('snippet')} {item.get('title')}"
-                for m in regex.findall(text): 
-                    formatted = clean_and_format_link(m)
-                    if formatted: found.append(formatted)
-    except: pass
-    return list(set(found))
-
-def scrape_site_content(url):
-    """Siteyi Chrome gibi açar ve tüm linkleri süpürür"""
-    found = set()
-    logger.info(f"🌐 Siteye Giriliyor: {url}")
-    try:
-        # Chrome 124 taklidi (Cloudflare geçmek için)
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36'}
-        response = cureq.get(url, headers=headers, impersonate="chrome124", timeout=25)
-        
-        # 1. Regex ile metin tarama (Sayfada yazan her t.me linki)
-        regex = re.compile(r'(?:https?://)?(?:www\.)?t\.me/[\w\d_+\-]+')
-        for m in regex.findall(response.text):
-            formatted = clean_and_format_link(m)
-            if formatted: found.add(formatted)
-
-        # 2. HTML href tarama (Gizli butonlar)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if "t.me" in href:
-                formatted = clean_and_format_link(href)
-                if formatted: found.add(formatted)
-            
-    except Exception as e: logger.error(f"Site Hatası: {e}")
-    logger.info(f"✅ Siteden {len(found)} link süpürüldü.")
-    return list(found)
+# ==================== 🔥 GRUP TARAMA (FİXLENDİ) ====================
 
 async def scrape_from_telegram_group(source_link, limit=500):
-    """Grup linklerini çeker (Filtresiz)"""
     found_links = set()
-    logger.info(f"♻️ Gruba Bakılıyor: {source_link}")
+    
+    # Hangi client'ı kullanacağız?
+    # Userbot varsa onu kullan (Her yere girer)
+    # Yoksa Bot'u kullan (Sadece olduğu grupları görür)
+    if userbot and userbot.is_connected():
+        client_to_use = userbot
+        worker_name = "Userbot"
+    else:
+        client_to_use = bot
+        worker_name = "Bot"
+
+    logger.info(f"♻️ Grup Taranıyor ({worker_name}): {source_link}")
+    
     try:
-        entity = await client.get_entity(source_link)
-        async for message in client.iter_messages(entity, limit=limit):
+        # Önce linki çözümle (Invite link mi yoksa public mi?)
+        if "joinchat" in source_link or "+" in source_link:
+            try:
+                # Private link ise katılmaya çalış (Sadece Userbot yapabilir)
+                if worker_name == "Userbot":
+                    entity = await client_to_use.join_chat(source_link)
+                else:
+                    logger.error("❌ Bot özel linklere katılamaz. Userbot (Session) ekleyin.")
+                    return []
+            except Exception as e:
+                logger.error(f"Gruba girilemedi: {e}")
+                return []
+        else:
+            try:
+                entity = await client_to_use.get_entity(source_link)
+            except Exception as e:
+                logger.error(f"Grup bulunamadı ({worker_name}): {e}")
+                return []
+
+        # Mesajları Tara
+        async for message in client_to_use.iter_messages(entity, limit=limit):
+            # Metin içindeki linkler
             if message.text:
                 regex = re.compile(r'(?:https?://)?t\.me/[\w\d_+\-]+')
                 for m in regex.findall(message.text):
                     formatted = clean_and_format_link(m)
                     if formatted: found_links.add(formatted)
             
+            # Butonlardaki linkler
             if message.reply_markup and hasattr(message.reply_markup, 'rows'):
                 for row in message.reply_markup.rows:
                     for btn in row.buttons:
                         if hasattr(btn, 'url') and btn.url and "t.me" in btn.url:
-                            found_links.add(btn.url)
-    except Exception as e: logger.error(f"Grup Hatası: {e}")
+                            found_links.add(clean_and_format_link(btn.url))
+            
+            # Entities (Metne gömülü linkler)
+            if message.entities:
+                for ent in message.entities:
+                    if hasattr(ent, 'url') and ent.url and "t.me" in ent.url:
+                        found_links.add(clean_and_format_link(ent.url))
+
+    except Exception as e:
+        logger.error(f"Grup Tarama Hatası: {e}")
+        
+    logger.info(f"✅ {worker_name} {len(found_links)} link buldu.")
     return list(found_links)
+
+# ==================== DİĞER TARAYICILAR ====================
+
+def fetch_combot_api(url):
+    found = []
+    logger.info("🔓 Combot API...")
+    lang = "tr"
+    if "lng=" in url:
+        try: lang = url.split("lng=")[1].split("&")[0]
+        except: pass
+    
+    api_url = f"https://combot.org/api/chart/all?limit=100&offset=0&lang={lang}"
+    try:
+        resp = requests.get(api_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        if resp.status_code == 200:
+            for item in resp.json():
+                if 'u' in item: found.append(f"https://t.me/{item['u']}")
+    except: pass
+    return found
+
+def scrape_site_content(url):
+    if "combot.org" in url: return fetch_combot_api(url)
+    found = set()
+    logger.info(f"🌐 Site: {url}")
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = cureq.get(url, headers=headers, impersonate="chrome124", timeout=25)
+        regex = re.compile(r'(?:https?://)?(?:www\.)?t\.me/[\w\d_+\-]+')
+        for m in regex.findall(response.text):
+            formatted = clean_and_format_link(m)
+            if formatted: found.add(formatted)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            if "t.me" in a['href']: found.add(clean_and_format_link(a['href']))
+    except: pass
+    return list(found)
+
+def google_search(query):
+    found = []
+    if not GOOG_API_KEY: return []
+    try:
+        url = "https://www.googleapis.com/customsearch/v1"
+        for page in range(0, 20, 10):
+            params = {'key': GOOG_API_KEY, 'cx': GOOG_CX, 'q': query, 'start': page+1, 'num': 10}
+            resp = requests.get(url, params=params).json()
+            if "items" not in resp: break
+            for item in resp['items']:
+                text = f"{item['link']} {item['snippet']}"
+                regex = re.compile(r't\.me/[\w\d_+\-]+')
+                for m in regex.findall(text): found.append(clean_and_format_link(m))
+    except: pass
+    return list(set([f for f in found if f]))
+
+def duckduckgo_search(query):
+    found = []
+    try:
+        with DDGS() as ddgs:
+            for region in ['tr-tr', 'wt-wt']:
+                results = ddgs.text(query, region=region, safesearch='off', max_results=50)
+                for r in results:
+                    text = f"{r['href']} {r['body']}"
+                    regex = re.compile(r't\.me/[\w\d_+\-]+')
+                    for m in regex.findall(text): found.append(clean_and_format_link(m))
+    except: pass
+    return list(set([f for f in found if f]))
 
 # ==================== MENÜLER ====================
 
-@client.on(events.NewMessage(pattern='/start'))
+@bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     if event.is_private:
+        asyncio.create_task(sync_history_from_group())
         user = await event.get_sender()
         is_allowed, info = check_license(user.id)
         status = "👑 **Yönetici**" if info == "admin" else f"⏳ **Hak:** {DENEME_HAKKI - info}"
-        
         tid = BOT_CONFIG.get("target_chat_id")
-        topic = BOT_CONFIG.get("target_topic_id")
-        target_info = f"✅ `{tid}`" if tid else "❌ **AYARLANMADI**"
-        if topic: target_info += f" (T: {topic})"
+        t_info = f"✅ `{tid}`" if tid else "❌ **AYARSIZ**"
+        
+        # Userbot Bilgisi
+        ub_txt = "✅ Userbot Aktif" if userbot and userbot.is_connected() else "⚠️ Userbot Yok (Kısıtlı)"
 
         text = (
-            f"👋 **{BOT_NAME}**\n"
-            f"🌍 **Mod:** Global Search (Dünya Geneli)\n\n"
+            f"👋 **{BOT_NAME}**\n\n"
             f"{status}\n"
-            f"🎯 **Hedef:** {target_info}\n\n"
-            "👇 **Ne yapmak istersin?**"
+            f"🎯 **Hedef:** {t_info}\n"
+            f"🤖 **Mod:** {ub_txt}\n\n"
+            "👇 **Ne Lazım?**"
         )
         
         buttons = [
-            [Button.inline("🔍 Global Kelime Ara", b"search_keyword"), Button.inline("🌐 Site Tara", b"search_site")],
+            [Button.inline("🔍 Kelime Ara", b"search_keyword"), Button.inline("🌐 Site Tara", b"search_site")],
             [Button.inline("♻️ Gruptan Çek", b"scrape_group")],
-            [Button.inline("⚙️ Hedef Nasıl Ayarlanır?", b"set_target_help")],
+            [Button.inline("⚙️ Hedef Ayarla", b"set_target_help")],
             [Button.url("📣 Kanal", KANAL_LINKI), Button.url("👨‍💻 Admin", f"https://t.me/{ADMIN_USER}")]
         ]
         await event.respond(text, buttons=buttons)
 
-@client.on(events.NewMessage(pattern='/kur'))
+@bot.on(events.NewMessage(pattern='/kur'))
 async def setup_here(event):
     if event.sender_id != ADMIN_ID: return
-    chat_id = event.chat_id
-    topic_id = event.reply_to_msg_id if event.is_reply else None
-    if not topic_id and event.reply_to: topic_id = event.reply_to.reply_to_msg_id
-    BOT_CONFIG["target_chat_id"] = chat_id
-    BOT_CONFIG["target_topic_id"] = topic_id
+    BOT_CONFIG["target_chat_id"] = event.chat_id
+    BOT_CONFIG["target_topic_id"] = event.reply_to_msg_id if event.is_reply else None
     save_config(BOT_CONFIG)
-    await event.reply(f"✅ **BAŞARILI!**\n🆔 `{chat_id}`\n📂 `{topic_id}`")
+    asyncio.create_task(sync_history_from_group())
+    await event.reply(f"✅ **BAŞARILI!**\n🆔 `{event.chat_id}`")
 
-@client.on(events.NewMessage(pattern='/hedef'))
-async def manual_target(event):
-    if event.sender_id != ADMIN_ID: return
-    try:
-        link = event.message.text.split(" ", 1)[1]
-        cid, tid = await resolve_target_link(link)
-        if cid:
-            BOT_CONFIG["target_chat_id"] = cid
-            BOT_CONFIG["target_topic_id"] = tid
-            save_config(BOT_CONFIG)
-            msg = f"✅ **Hedef Ayarlandı!**\n🆔 `{cid}`"
-            if tid: msg += f"\n📂 Topic: `{tid}`"
-            await event.reply(msg)
-        else: await event.reply("❌ Link geçersiz.")
-    except: await event.reply("❌ Kullanım: `/hedef <LINK>`")
-
-@client.on(events.CallbackQuery)
+@bot.on(events.CallbackQuery)
 async def callback_handler(event):
     user_id = event.sender_id
     data = event.data.decode('utf-8')
     
     if data == "set_target_help":
-        if user_id != ADMIN_ID: return await event.answer("Sadece Admin!", alert=True)
-        await event.edit("⚙️ **Ayarlama:**\n\n1. Gruba/Topice gir.\n2. **/kur** yaz.", buttons=[[Button.inline("🔙", b"main_menu")]])
+        if user_id != ADMIN_ID: return await event.answer("Admin Only!", alert=True)
+        await event.edit("⚙️ **Kurulum:**\nHedef topic'e gir, **/kur** yaz.", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "search_keyword":
         is_allowed, info = check_license(user_id)
-        if not is_allowed: return await event.answer("Limit Doldu!", alert=True)
-        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("⚠️ Önce Hedef Ayarla (/kur)", alert=True)
+        if not is_allowed: return await event.answer("Limit Bitti!", alert=True)
+        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("Hedef Yok!", alert=True)
         USER_STATES[user_id] = "KEYWORD"
-        await event.edit("🔍 **Aranacak Kelime?**\n(Global arama yapılır)", buttons=[[Button.inline("🔙", b"main_menu")]])
+        await event.edit("🔍 **Hangi Kelime?**", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "search_site":
         is_allowed, info = check_license(user_id)
-        if not is_allowed: return await event.answer("Limit Doldu!", alert=True)
-        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("⚠️ Önce Hedef Ayarla", alert=True)
+        if not is_allowed: return await event.answer("Limit Bitti!", alert=True)
+        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("Hedef Yok!", alert=True)
         USER_STATES[user_id] = "SITE"
-        await event.edit("🌐 **Site Linki?**\n(Örn: combot.org/...)", buttons=[[Button.inline("🔙", b"main_menu")]])
+        await event.edit("🌐 **Hangi Site?**\n(Örn: combot.org)", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "scrape_group":
         is_allowed, info = check_license(user_id)
-        if not is_allowed: return await event.answer("Limit Doldu!", alert=True)
-        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("⚠️ Önce Hedef Ayarla", alert=True)
+        if not is_allowed: return await event.answer("Limit Bitti!", alert=True)
+        if not BOT_CONFIG.get("target_chat_id"): return await event.answer("Hedef Yok!", alert=True)
         USER_STATES[user_id] = "GROUP_SCRAPE"
-        await event.edit("♻️ **Kaynak Grup Linki?**", buttons=[[Button.inline("🔙", b"main_menu")]])
+        
+        # Uyarı metni
+        warning = "\n⚠️ **Uyarı:** Userbot yoksa sadece botun olduğu gruplar çalışır." if not userbot else ""
+        await event.edit(f"♻️ **Kaynak Grup Linki?**{warning}", buttons=[[Button.inline("🔙", b"main_menu")]])
 
     elif data == "main_menu":
         await start_handler(event)
 
-@client.on(events.NewMessage)
+@bot.on(events.NewMessage)
 async def input_handler(event):
     if event.is_group or event.message.text.startswith("/"): return
     user_id = event.sender_id
@@ -342,37 +379,27 @@ async def input_handler(event):
     del USER_STATES[user_id]
     
     is_allowed, info = check_license(user_id)
-    if not is_allowed: return await event.respond("⛔ **Limit Doldu!**", buttons=[[Button.inline("🔙", b"main_menu")]])
+    if not is_allowed: return await event.respond("⛔ **Bitti.**")
 
-    msg = await event.respond("🚀 **Motorlar Çalıştırılıyor...**")
+    msg = await event.respond("🚀 **Başlıyoruz...**")
     raw_links = []
     
     if state == "KEYWORD":
         keywords = [k.strip() for k in text.split(",")]
         for kw in keywords:
-            # 1. DuckDuckGo (Global & Sansürsüz)
-            try: await msg.edit(f"🦆 **DuckDuckGo Taranıyor:** `{kw}`")
-            except: pass
-            
-            # Farklı varyasyonlar
-            queries = [
+            qs = [
                 f'site:t.me "{kw}"', 
-                f'"{kw}" telegram group link',
-                f'site:telegra.ph "{kw}"', # Telegra.ph'de genelde arşivler olur
-                f'site:pastebin.com "{kw}"' # Pastebin'de listeler olur
+                f'(site:tgstat.com OR site:telemetr.io) "{kw}"'
             ]
-            
-            for q in queries:
+            for q in qs:
+                try: await msg.edit(f"🔎 **Aranıyor:** `{kw}`")
+                except: pass
+                raw_links.extend(google_search(q))
                 raw_links.extend(duckduckgo_search(q))
                 await asyncio.sleep(1)
 
-            # 2. Google (Yedek)
-            try: await msg.edit(f"🔎 **Google Taranıyor:** `{kw}`")
-            except: pass
-            raw_links.extend(google_search(f'site:t.me "{kw}"'))
-
     elif state == "SITE":
-        try: await msg.edit(f"🌐 **Siteye Giriliyor...**\n`{text[:30]}...`")
+        try: await msg.edit(f"🌐 **Site Kazılıyor...**")
         except: pass
         if "http" not in text: text = "https://" + text
         raw_links = scrape_site_content(text)
@@ -387,31 +414,44 @@ async def input_handler(event):
     target_id = BOT_CONFIG.get("target_chat_id")
     target_topic = BOT_CONFIG.get("target_topic_id")
     
-    if not raw_links:
+    unique_links = list(set([l for l in raw_links if l])) # Temizle
+    
+    if not unique_links:
         await msg.edit("❌ **Sonuç Yok.**", buttons=[[Button.inline("🔙", b"main_menu")]])
         return
 
-    unique_links = list(set(raw_links))
-    await msg.edit(f"🧐 **{len(unique_links)} Link Bulundu.**\nSüpürge modu aktif, hepsi gönderiliyor...")
+    await msg.edit(f"🧐 **{len(unique_links)} Link Bulundu.**\nAyıklanıyor ve atılıyor...")
 
     for link in unique_links:
         if toplanan >= HEDEF_LINK_LIMITI: break
         can_continue, _ = check_license(user_id)
         if not can_continue: break
 
-        if link not in history:
+        # Hafıza Kontrolü
+        if link not in history and link not in RUNTIME_HISTORY:
             try:
-                # DOĞRULAMA YOK - Direkt Gönderim
-                await client.send_message(target_id, link, reply_to=target_topic, link_preview=False)
+                await bot.send_message(target_id, link, reply_to=target_topic, link_preview=False)
                 history.add(link)
                 save_history(link)
+                RUNTIME_HISTORY.add(link)
                 consume_credit(user_id)
                 toplanan += 1
-                await asyncio.sleep(1.5) # Biraz hızlandırdık
+                await asyncio.sleep(1.5)
             except Exception as e: logger.error(f"Hata: {e}")
     
-    await msg.edit(f"🏁 **Tamamlandı!**\n**{toplanan}** adet link atıldı.", buttons=[[Button.inline("🔙 Menü", b"main_menu")]])
+    await msg.edit(f"🏁 **Tamamlandı!**\n**{toplanan}** yeni link atıldı.", buttons=[[Button.inline("🔙 Menü", b"main_menu")]])
+
+# ==================== ANA DÖNGÜ ====================
+async def main():
+    if userbot:
+        logger.info("✅ Userbot Başlatılıyor...")
+        await userbot.start()
+    
+    logger.info("✅ Bot Başlatılıyor...")
+    await bot.start()
+    await bot.run_until_disconnected()
 
 if __name__ == '__main__':
     keep_alive()
-    client.run_until_disconnected()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
